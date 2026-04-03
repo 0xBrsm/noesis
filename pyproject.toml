@@ -1,0 +1,72 @@
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry]
+name = "memweave"
+version = "0.1.0"
+description = "Agentic memory you can read, search, and git diff"
+authors = ["Sachin Sharma <sachin.sharma.tukl@gmail.com>"]
+readme = "README.md"
+license = "MIT"
+keywords = ["ai", "agents", "memory", "rag", "llm", "multi-agent"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+packages = [{ include = "memweave" }]
+
+[tool.poetry.urls]
+Repository = "https://github.com/sachinsharma9780/memweave"
+
+[tool.poetry.dependencies]
+python = "^3.12"
+aiosqlite = ">=0.20.0"
+aiofiles = ">=23.0.0"
+litellm = ">=1.80.13,<2.0"
+numpy = ">=1.24.0"
+sqlite-vec = ">=0.1.0"
+watchfiles =  ">=0.20.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = ">=8.0.0"
+pytest-asyncio = ">=0.23.0"
+pytest-cov = ">=5.0.0"
+mypy = ">=1.9.0"
+ruff = ">=0.4.0"
+python-dotenv = ">=1.0.0"
+types-aiofiles = ">=23.0.0"
+black = ">=24.0.0"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = ["integration: requires live embedding/LLM API (mark with pytest.mark.integration)"]
+
+[tool.coverage.run]
+source = ["memweave"]
+omit = ["tests/*"]
+
+[tool.coverage.report]
+fail_under = 70
+show_missing = true
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+ignore_missing_imports = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = ["E501"]
+
+[tool.black]
+line-length = 100
+target-version = ["py312"]
