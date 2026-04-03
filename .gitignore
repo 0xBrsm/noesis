@@ -1,0 +1,38 @@
+# Build artifacts
+dist/
+*.egg-info/
+
+# Virtual environments
+.venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Test and coverage
+.coverage
+htmlcov/
+coverage.xml
+.pytest_cache/
+
+# Environment
+.env
+
+# macOS
+.DS_Store
+
+# mypy
+.mypy_cache/
+
+# Ruff cache
+.ruff_cache/
+
+# memweave index (generated, not source)
+.memweave/
+
+# Local test scripts
+test_readme_code/
+
+# Docs (generated)
+docs/
