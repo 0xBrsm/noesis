@@ -21,6 +21,8 @@ memweave is a zero-infrastructure, async-first Python library that gives AI agen
 - 🌐 **Works completely offline.** If your embedding API is down, memweave falls back to pure keyword search. It never crashes; it degrades gracefully.
 - 💸 **Zero server cost, zero setup.** The entire memory store is a single SQLite file on disk — no vector database to provision, no cloud service to pay for, no Docker container to manage.
 - 🔌 **Pluggable at every layer.** Swap in a custom search strategy, add a post-processing step, or bring your own embedding provider via a single protocol.
+- 📅 **Memories age naturally.** Recent knowledge ranks above stale context automatically — no manual cleanup, no ever-growing noise. Foundational facts stay exempt.
+- 🎯 **No redundant results.** MMR re-ranking ensures the top results cover different aspects of your query — not the same fact repeated from five slightly different chunks.
 
 ---
 
@@ -100,7 +102,7 @@ memweave separates **storage** from **search**:
 
 **Write path** — `await mem.add(path)` takes any Markdown file you've written — dated, evergreen, agent-scoped, or session — chunks it, checks the embedding cache (hash lookup), calls the embedding API only on a miss, and inserts into both the FTS5 and vector tables. No LLM involved.
 
-**Search path** — `await mem.search(query)` embeds the query, runs vector search and keyword search in parallel, merges scores (`0.7 × vector + 0.3 × BM25`), applies post-processors (threshold → MMR → temporal decay), and returns ranked results.
+**Search path** — `await mem.search(query)` embeds the query, runs vector search and keyword search in parallel, merges scores (`0.7 × vector + 0.3 × BM25`), applies post-processors (threshold → temporal decay → MMR), and returns ranked results.
 
 ---
 
@@ -138,24 +140,160 @@ Every file gets a `source` label derived from its path — the **immediate subdi
 
 Pass `source_filter="researcher_agent"` to `search()` to scope results exclusively to that namespace. Only the first path component counts — `memory/researcher_agent/sub/x.md` has source `"researcher_agent"`, not `"sub"`.
 
-### Hybrid search
+### Search pipeline
+
+Every `mem.search(query)` call moves through five fixed stages in order:
 
 ```
-query: "which database should I use for JSON?"
-         │
-         ├─ FTS5 BM25  ──────── exact keywords → score A
-         │
-         └─ sqlite-vec cosine ─ semantic match  → score B
-                    │
-                    ▼
-         merged = 0.7 × B + 0.3 × A
+                        query
+                          │
+             ┌────────────┴────────────┐
+             │                         │
+     FTS5 BM25 (keyword)      sqlite-vec ANN (semantic)
+     exact term matching       cosine similarity
+             │                         │
+             └────────────┬────────────┘
+                          │  weighted merge
+                          │  score = 0.7 × vector + 0.3 × BM25
+                          │
+                 ┌────────▼────────┐
+                 │ ScoreThreshold  │  drop results below min_score (default 0.35)
+                 └────────┬────────┘
+                          │
+                 ┌────────▼────────┐
+                 │ TemporalDecay   │  multiply score by exp(−λ × age_days)
+                 │  (opt-in)       │  evergreen files exempt
+                 └────────┬────────┘
+                          │
+                 ┌────────▼────────┐
+                 │  MMR Reranker   │  reorder for relevance + diversity
+                 │  (opt-in)       │  λ × relevance − (1−λ) × similarity_to_selected
+                 └────────┬────────┘
+                          │
+                 ┌────────▼────────┐
+                 │ Custom          │  your own PostProcessor(s)
+                 │ processors      │  via mem.register_postprocessor()
+                 └────────┬────────┘
+                          │
+                   list[SearchResult]
 ```
 
-Post-processors run after merging:
+**Stage 1 — Hybrid merge.** Both backends run against the same query. FTS5 BM25 catches exact keyword matches (error codes, config values, proper names). sqlite-vec cosine catches semantically related content even when no keyword overlaps. Scores are normalised and merged: `0.7 × vector_score + 0.3 × bm25_score`. Weights are tunable via `HybridConfig`.
 
-- **Score threshold** — drops results below `min_score` (default `0.35`)
-- **MMR re-ranking** — penalises redundant results, promotes diversity (disabled by default)
-- **Temporal decay** — exponential score reduction by file age, evergreen exempt (disabled by default)
+**Stage 2 — Score threshold.** Drops any result whose merged score is below `min_score` (default `0.35`). Acts as a noise gate — prevents low-confidence matches from entering the post-processing stages. Always active; override per-call with `mem.search(query, min_score=0.5)`.
+
+**Stage 3 — Temporal decay** *(opt-in).* Multiplies each result's score by an exponential factor based on the age of its source file. Recent memories rank higher; old ones fade naturally. Evergreen files are exempt and always surface at full score. See [Temporal decay](#temporal-decay) below.
+
+**Stage 4 — MMR re-ranking** *(opt-in).* Reorders the remaining results to balance relevance against diversity. Prevents the top results from being near-duplicates of each other. See [MMR re-ranking](#mmr-re-ranking) below.
+
+**Stage 5 — Custom processors.** Any processors registered with `mem.register_postprocessor()` run last, in registration order. Each receives the output of the previous stage and can filter, reorder, or rescore freely.
+
+---
+
+### Temporal decay
+
+Agents accumulate knowledge over time — but not all knowledge ages equally. A decision made yesterday should outrank one made six months ago when both are semantically relevant. Without decay, a stale debugging note from last quarter can surface above this morning's architecture decision simply because it embeds well.
+
+Temporal decay solves this by multiplying each result's score by a factor that shrinks the older the source file is. The score is never zeroed out — old memories still surface, they just rank lower than recent ones.
+
+**How the formula works:**
+
+```
+λ            = ln(2) / half_life_days
+multiplier   = exp(−λ × age_days)
+decayed_score = original_score × multiplier
+```
+
+At `age_days = 0` the multiplier is `1.0` — no change. At `age_days = half_life_days` it is exactly `0.5`. The curve is smooth and continuous, so a file that is two half-lives old scores at `0.25×`, three half-lives at `0.125×`, and so on.
+
+With the default `half_life_days=30`:
+
+| File age | Multiplier | Effect on a 0.80 score |
+|----------|------------|------------------------|
+| Today    | 1.00       | 0.80 (unchanged)       |
+| 30 days  | 0.50       | 0.40                   |
+| 60 days  | 0.25       | 0.20                   |
+| 90 days  | 0.13       | 0.10                   |
+
+**How age is determined — three file categories:**
+
+| File | Age source | Decays? |
+|------|------------|---------|
+| `memory/MEMORY.md`, `memory/architecture.md` (any non-dated file under `memory/`) | — | **No** — evergreen, always full score |
+| `memory/2026-03-21.md` (dated daily log) | Date parsed from filename | **Yes** |
+| `sessions/foo.md`, `memory/agents/notes.md` (undated, non-evergreen) | File `mtime` on disk | **Yes** |
+
+Evergreen files hold foundational facts — stack choices, hard constraints, permanent preferences — that should always surface at full score regardless of when they were written. Daily logs capture evolving context and fade naturally as new sessions add fresher knowledge.
+
+**Enabling temporal decay:**
+
+```python
+from memweave import MemWeave
+from memweave.config import MemoryConfig, QueryConfig, TemporalDecayConfig
+
+config = MemoryConfig(
+    query=QueryConfig(
+        temporal_decay=TemporalDecayConfig(
+            enabled=True,
+            half_life_days=30.0,   # score halves every 30 days; tune to your workflow
+        ),
+    ),
+)
+
+async with MemWeave(config) as mem:
+    results = await mem.search("database choice")
+    # results from last week will rank above results from last quarter
+    # results from memory/MEMORY.md are exempt and always surface at full score
+```
+
+Tune `half_life_days` to your workflow: `7` for fast-moving projects where week-old context is already stale, `90` for research or documentation repositories where knowledge stays relevant for months.
+
+### MMR re-ranking
+
+Without diversity control, the top results from a hybrid search are often near-duplicates — multiple chunks from the same file, or different phrasings of the same fact. An agent loading all of them into its context window wastes tokens and misses other relevant but different memories.
+
+MMR (Maximal Marginal Relevance) reorders results after scoring to balance how relevant a result is against how similar it is to results already selected. At each step it picks the candidate that maximises:
+
+```
+MMR score = λ × relevance − (1−λ) × max_similarity_to_already_selected
+```
+
+Similarity is computed as Jaccard overlap between the token sets of the candidate and each already-selected result. This means two chunks that share many of the same words — even from different files — are treated as redundant, and the second one is pushed down in favour of something genuinely different.
+
+**The `lambda_param` dial:**
+
+| `lambda_param` | Behaviour |
+|----------------|-----------|
+| `1.0` | Pure relevance — identical to no MMR (no-op) |
+| `0.7` | Default — strong relevance bias, light diversity push |
+| `0.5` | Equal weight — relevance and diversity balanced |
+| `0.0` | Pure diversity — maximally novel results, relevance ignored |
+
+**Enabling MMR:**
+
+```python
+from memweave import MemWeave
+from memweave.config import MemoryConfig, QueryConfig, MMRConfig
+
+config = MemoryConfig(
+    query=QueryConfig(
+        mmr=MMRConfig(
+            enabled=True,
+            lambda_param=0.7,   # 0 = max diversity, 1 = max relevance
+        ),
+    ),
+)
+
+async with MemWeave(config) as mem:
+    results = await mem.search("deployment steps")
+    # top results will cover different aspects of deployment
+    # rather than returning the same facts from multiple angles
+
+    # override λ per-call without touching the config
+    diverse = await mem.search("deployment steps", mmr_lambda=0.3)
+```
+
+MMR runs after temporal decay, so the diversity pass operates on already age-adjusted scores — the reranker sees a realistic picture of which results actually matter before deciding what is redundant.
 
 ---
 
