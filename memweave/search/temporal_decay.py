@@ -307,7 +307,7 @@ async def apply_temporal_decay(
             )
         )
 
-    return result
+    return sorted(result, key=lambda r: r.score, reverse=True)
 
 
 # ── PostProcessor wrapper ─────────────────────────────────────────────────────
