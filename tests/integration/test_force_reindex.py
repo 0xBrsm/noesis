@@ -43,20 +43,20 @@ async def test_force_reindex(workspace: Path, embedding_model: str) -> None:
 
         # Normal re-index — unchanged files skipped
         r2 = await mem.index()
-        assert r2.files_skipped == r2.files_scanned, (
-            f"All unchanged files should be skipped: scanned={r2.files_scanned} skipped={r2.files_skipped}"
-        )
+        assert (
+            r2.files_skipped == r2.files_scanned
+        ), f"All unchanged files should be skipped: scanned={r2.files_scanned} skipped={r2.files_skipped}"
 
         # force=True — must re-process all files regardless of hash
         # but content-addressed embedding cache still applies (same text → cache hit)
         r3 = await mem.index(force=True)
-        assert r3.files_skipped == 0, (
-            f"force=True should skip nothing, got files_skipped={r3.files_skipped}"
-        )
+        assert (
+            r3.files_skipped == 0
+        ), f"force=True should skip nothing, got files_skipped={r3.files_skipped}"
         assert r3.files_indexed > 0, "force=True should re-index all files"
-        assert r3.embeddings_computed + r3.embeddings_cached > 0, (
-            "Embeddings must be handled (computed or from cache) after force reindex"
-        )
+        assert (
+            r3.embeddings_computed + r3.embeddings_cached > 0
+        ), "Embeddings must be handled (computed or from cache) after force reindex"
 
         # Search must still work after force reindex
         results = await mem.search("Fargate auto scaling CPU", min_score=0.1)

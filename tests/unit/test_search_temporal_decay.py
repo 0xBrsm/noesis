@@ -51,6 +51,7 @@ def _row(chunk_id: str, path: str, score: float) -> RawSearchRow:
 
 # ── to_decay_lambda ───────────────────────────────────────────────────────────
 
+
 class TestToDecayLambda:
     def test_30_day_half_life(self):
         lam = to_decay_lambda(30.0)
@@ -73,6 +74,7 @@ class TestToDecayLambda:
 
 
 # ── calculate_decay_multiplier ────────────────────────────────────────────────
+
 
 class TestCalculateDecayMultiplier:
     def test_brand_new_multiplier_is_1(self):
@@ -104,6 +106,7 @@ class TestCalculateDecayMultiplier:
 
 # ── apply_decay_to_score ──────────────────────────────────────────────────────
 
+
 class TestApplyDecayToScore:
     def test_score_multiplied(self):
         multiplier = calculate_decay_multiplier(30, 30)  # ≈ 0.5
@@ -118,6 +121,7 @@ class TestApplyDecayToScore:
 
 
 # ── parse_date_from_path ──────────────────────────────────────────────────────
+
 
 class TestParseDateFromPath:
     def test_simple_dated_path(self):
@@ -155,6 +159,7 @@ class TestParseDateFromPath:
 
 # ── is_evergreen_path ─────────────────────────────────────────────────────────
 
+
 class TestIsEvergreenPath:
     def test_memory_md_uppercase(self):
         assert is_evergreen_path("MEMORY.md") is True
@@ -183,6 +188,7 @@ class TestIsEvergreenPath:
 
 # ── age_in_days ───────────────────────────────────────────────────────────────
 
+
 class TestAgeInDays:
     def test_positive_age(self):
         file_date = date(2026, 1, 1)
@@ -200,6 +206,7 @@ class TestAgeInDays:
 
 
 # ── _extract_date (async) ─────────────────────────────────────────────────────
+
 
 class TestExtractDate:
     async def test_dated_path_returned_directly(self):
@@ -256,6 +263,7 @@ class TestExtractDate:
 
 # ── apply_temporal_decay (async) ──────────────────────────────────────────────
 
+
 class TestApplyTemporalDecay:
     async def test_evergreen_score_unchanged(self):
         rows = [_row("ev", "MEMORY.md", 0.8)]
@@ -290,9 +298,7 @@ class TestApplyTemporalDecay:
         os.utime(f, (old_ts, old_ts))
 
         rows = [_row("s1", "sessions/old-session.md", 1.0)]
-        result = await apply_temporal_decay(
-            rows, half_life_days=30, workspace_dir=tmp_path
-        )
+        result = await apply_temporal_decay(rows, half_life_days=30, workspace_dir=tmp_path)
         # 100 days at half_life=30 → multiplier ≈ 0.096
         assert result[0].score < 0.15
 
@@ -303,9 +309,7 @@ class TestApplyTemporalDecay:
         f.write_text("Fresh session content")
 
         rows = [_row("s2", "sessions/fresh.md", 1.0)]
-        result = await apply_temporal_decay(
-            rows, half_life_days=30, workspace_dir=tmp_path
-        )
+        result = await apply_temporal_decay(rows, half_life_days=30, workspace_dir=tmp_path)
         assert result[0].score > 0.9
 
     async def test_mtime_cache_deduplicates_stat_calls(self, tmp_path: Path, monkeypatch):
@@ -344,9 +348,9 @@ class TestApplyTemporalDecay:
         result = await apply_temporal_decay(rows, half_life_days=30, now=today)
         id_map = {r.chunk_id: r for r in result}
 
-        assert id_map["ev"].score == pytest.approx(0.8)      # evergreen: unchanged
-        assert id_map["old"].score < 0.5                     # 86 days old: heavily decayed
-        assert id_map["new"].score == pytest.approx(0.6)     # same-day: unchanged
+        assert id_map["ev"].score == pytest.approx(0.8)  # evergreen: unchanged
+        assert id_map["old"].score < 0.5  # 86 days old: heavily decayed
+        assert id_map["new"].score == pytest.approx(0.6)  # same-day: unchanged
 
     async def test_returns_new_list(self):
         rows = [_row("a", "memory/2026-01-01.md", 1.0)]
@@ -373,8 +377,30 @@ class TestApplyTemporalDecay:
         # Score should be significantly decayed (file is years old)
         assert result[0].score < 0.1
 
+    async def test_output_sorted_by_decayed_score(self):
+        """Results must be returned sorted by decayed score descending.
+
+        Input order has the oldest file first (highest raw score) — after decay
+        it should rank last, with today's file ranking first.
+        """
+        today = date(2026, 3, 28)
+        rows = [
+            _row("old", "memory/2024-01-01.md", 0.9),  # ~820 days → near-zero after decay
+            _row("recent", "memory/2026-03-01.md", 0.7),  # 27 days  → moderate decay
+            _row("new", "memory/2026-03-28.md", 0.6),  # today     → no decay
+        ]
+        result = await apply_temporal_decay(rows, half_life_days=30, now=today)
+
+        scores = [r.score for r in result]
+        assert scores == sorted(
+            scores, reverse=True
+        ), f"Results must be sorted by decayed score descending, got: {scores}"
+        # new (no decay) > recent (moderate) > old (near-zero)
+        assert [r.chunk_id for r in result] == ["new", "recent", "old"]
+
 
 # ── TemporalDecayProcessor (PostProcessor wrapper) ───────────────────────────
+
 
 class TestTemporalDecayProcessor:
     async def test_apply_decays_scored_rows(self):
@@ -433,3 +459,19 @@ class TestTemporalDecayProcessor:
     async def test_default_workspace_dir_stored(self, tmp_path: Path):
         processor = TemporalDecayProcessor(workspace_dir=tmp_path)
         assert processor.workspace_dir == tmp_path
+
+    async def test_output_sorted_by_decayed_score(self):
+        """Processor must return results sorted by decayed score descending."""
+        today_path = f"memory/{date.today().isoformat()}.md"
+        processor = TemporalDecayProcessor(half_life_days=30.0)
+        rows = [
+            _row("old", "memory/2020-01-01.md", 0.9),  # years old → near-zero
+            _row("new", today_path, 0.6),  # today     → no decay
+        ]
+        result = await processor.apply(rows, "query")
+        scores = [r.score for r in result]
+        assert scores == sorted(
+            scores, reverse=True
+        ), f"Processor output must be sorted by decayed score, got: {scores}"
+        assert result[0].chunk_id == "new"  # today → no decay → ranks first
+        assert result[1].chunk_id == "old"  # years old → near-zero → ranks last

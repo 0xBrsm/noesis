@@ -50,6 +50,7 @@ def make_litellm_response(vectors: list[list[float]]) -> MagicMock:
 
 # ── Protocol conformance ──────────────────────────────────────────────────────
 
+
 class TestEmbeddingProviderProtocol:
     def test_litellm_provider_conforms(self):
         """LiteLLMEmbeddingProvider should satisfy the EmbeddingProvider protocol."""
@@ -58,9 +59,11 @@ class TestEmbeddingProviderProtocol:
 
     def test_duck_type_conforms(self):
         """Any object with embed_query and embed_batch methods conforms."""
+
         class MyProvider:
             async def embed_query(self, text: str) -> list[float]:
                 return [1.0]
+
             async def embed_batch(self, texts: list[str]) -> list[list[float]]:
                 return [[1.0]] * len(texts)
 
@@ -68,15 +71,18 @@ class TestEmbeddingProviderProtocol:
 
     def test_incomplete_duck_type_does_not_conform(self):
         """Object with only one method should NOT conform."""
+
         class Incomplete:
             async def embed_query(self, text: str) -> list[float]:
                 return [1.0]
+
             # Missing embed_batch
 
         assert not isinstance(Incomplete(), EmbeddingProvider)
 
 
 # ── embed_query ───────────────────────────────────────────────────────────────
+
 
 class TestEmbedQuery:
     async def test_empty_text_raises(self):
@@ -116,6 +122,7 @@ class TestEmbedQuery:
 
 # ── embed_batch ───────────────────────────────────────────────────────────────
 
+
 class TestEmbedBatch:
     async def test_empty_list_returns_empty(self):
         provider = make_provider()
@@ -147,11 +154,11 @@ class TestEmbedBatch:
         with patch("litellm.aembedding", new=AsyncMock(side_effect=fake_embed)):
             result = await provider.embed_batch(["t1", "t2", "t3", "t4", "t5"])
 
-        assert len(calls) == 3        # 3 batches
-        assert len(calls[0]) == 2     # first batch: 2 items
-        assert len(calls[1]) == 2     # second batch: 2 items
-        assert len(calls[2]) == 1     # third batch: 1 item
-        assert len(result) == 5       # 5 total results
+        assert len(calls) == 3  # 3 batches
+        assert len(calls[0]) == 2  # first batch: 2 items
+        assert len(calls[1]) == 2  # second batch: 2 items
+        assert len(calls[2]) == 1  # third batch: 1 item
+        assert len(result) == 5  # 5 total results
 
     async def test_result_order_preserved(self):
         """Results must be in the same order as the input texts."""
@@ -172,6 +179,7 @@ class TestEmbedBatch:
     async def test_all_normalized(self):
         """All returned vectors should be unit-normalized."""
         import random
+
         rng = random.Random(42)
         raw_vecs = [[rng.gauss(0, 1) for _ in range(8)] for _ in range(10)]
         response = make_litellm_response(raw_vecs)
@@ -185,6 +193,7 @@ class TestEmbedBatch:
 
 
 # ── Retry behavior ────────────────────────────────────────────────────────────
+
 
 class TestRetryBehavior:
     async def test_retries_on_rate_limit(self):
@@ -243,6 +252,7 @@ class TestRetryBehavior:
 
 # ── Provider properties ───────────────────────────────────────────────────────
 
+
 class TestProviderProperties:
     def test_model_property(self):
         provider = make_provider(model="text-embedding-3-large")
@@ -254,6 +264,7 @@ class TestProviderProperties:
 
 
 # ── _get_status_code ──────────────────────────────────────────────────────────
+
 
 class TestGetStatusCode:
     def test_exception_with_status_code(self):

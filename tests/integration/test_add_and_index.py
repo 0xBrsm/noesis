@@ -42,5 +42,7 @@ async def test_add_and_index(workspace: Path, embedding_model: str) -> None:
 
     assert result.files_indexed >= 1, f"Expected ≥1 file indexed, got {result.files_indexed}"
     assert result.chunks_created >= 1, f"Expected ≥1 chunk, got {result.chunks_created}"
-    assert result.embeddings_computed >= 1, f"Expected ≥1 embedding, got {result.embeddings_computed}"
+    assert (
+        result.embeddings_computed >= 1
+    ), f"Expected ≥1 embedding, got {result.embeddings_computed}"
     assert result.duration_ms > 0, "Expected positive duration"

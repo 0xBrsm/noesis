@@ -31,8 +31,8 @@ from memweave.config import ChunkingConfig, EmbeddingConfig, QueryConfig
 from memweave.search.strategy import RawSearchRow
 from memweave.types import IndexResult, SearchResult, StoreStatus
 
-
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
 
 class MockEmbeddingProvider:
     """Fake embedding provider: returns deterministic float vectors."""
@@ -83,6 +83,7 @@ def _write_md(tmp_path: Path, rel: str, content: str) -> Path:
 
 # ── __init__ ──────────────────────────────────────────────────────────────────
 
+
 class TestMemWeaveInit:
     def test_default_config(self):
         mem = MemWeave()
@@ -105,6 +106,7 @@ class TestMemWeaveInit:
 
 
 # ── Lifecycle ─────────────────────────────────────────────────────────────────
+
 
 class TestLifecycle:
     async def test_open_creates_db_file(self, tmp_path: Path):
@@ -144,6 +146,7 @@ class TestLifecycle:
 
 # ── register_strategy / register_postprocessor ───────────────────────────────
 
+
 class TestExtensions:
     async def test_register_strategy_stored(self, tmp_path: Path):
         mem = await _open_mem(tmp_path)
@@ -162,6 +165,7 @@ class TestExtensions:
 
 
 # ── index() ───────────────────────────────────────────────────────────────────
+
 
 class TestIndex:
     async def test_empty_workspace_returns_zero_counts(self, tmp_path: Path):
@@ -249,6 +253,7 @@ class TestIndex:
 
 # ── add() ─────────────────────────────────────────────────────────────────────
 
+
 class TestAdd:
     async def test_add_single_file(self, tmp_path: Path):
         f = _write_md(tmp_path, "memory/2026-01-01.md", "# Note\n\nAdded directly.")
@@ -274,6 +279,7 @@ class TestAdd:
 
 
 # ── search() ──────────────────────────────────────────────────────────────────
+
 
 class TestSearch:
     async def test_search_empty_index_returns_empty(self, tmp_path: Path):
@@ -319,6 +325,7 @@ class TestSearch:
         mem = await _open_mem(tmp_path)
         mem.config.sync.on_search = False
         from memweave.exceptions import SearchError
+
         with pytest.raises(SearchError, match="Unknown search strategy"):
             await mem.search("q", strategy="no-such-strategy")
         await mem.close()
@@ -347,6 +354,7 @@ class TestSearch:
 
 
 # ── status() ─────────────────────────────────────────────────────────────────
+
 
 class TestStatus:
     async def test_status_fields_present(self, tmp_path: Path):
@@ -383,6 +391,7 @@ class TestStatus:
 
 # ── files() ──────────────────────────────────────────────────────────────────
 
+
 class TestFiles:
     async def test_files_empty_when_no_files(self, tmp_path: Path):
         mem = await _open_mem(tmp_path)
@@ -415,6 +424,7 @@ class TestFiles:
 
 
 # ── provider fingerprint ─────────────────────────────────────────────────────
+
 
 class TestProviderFingerprint:
     async def test_first_run_no_forced_reindex(self, tmp_path: Path):

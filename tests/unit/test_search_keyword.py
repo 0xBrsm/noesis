@@ -22,8 +22,8 @@ from memweave.search.keyword import (
     is_stop_word,
 )
 
-
 # ── build_fts_query ───────────────────────────────────────────────────────────
+
 
 class TestBuildFtsQuery:
     def test_simple_two_words(self):
@@ -70,6 +70,7 @@ class TestBuildFtsQuery:
 
 
 # ── bm25_rank_to_score ────────────────────────────────────────────────────────
+
 
 class TestBm25RankToScore:
     def test_strong_negative_rank_gives_high_score(self):
@@ -125,6 +126,7 @@ class TestBm25RankToScore:
 
 # ── is_stop_word ──────────────────────────────────────────────────────────────
 
+
 class TestIsStopWord:
     def test_english_stop_words(self):
         for word in ["the", "a", "is", "and", "what", "how", "please"]:
@@ -159,6 +161,7 @@ class TestIsStopWord:
 
 
 # ── extract_keywords ──────────────────────────────────────────────────────────
+
 
 class TestExtractKeywords:
     def test_filters_english_stop_words(self):
@@ -205,6 +208,7 @@ class TestExtractKeywords:
 
 # ── KeywordSearch integration ─────────────────────────────────────────────────
 
+
 async def _make_fts_db() -> aiosqlite.Connection:
     """In-memory SQLite DB with chunks + chunks_fts tables for testing."""
     db = await aiosqlite.connect(":memory:")
@@ -232,18 +236,44 @@ async def _make_fts_db() -> aiosqlite.Connection:
     """)
     # Seed some rows
     rows = [
-        ("id1", "memory/2026-01-01.md", "memory", "test-model", 1, 5,
-         "We chose PostgreSQL for its JSONB support and reliability."),
-        ("id2", "memory/2026-01-02.md", "memory", "test-model", 1, 4,
-         "React was selected as the frontend framework for the dashboard."),
-        ("id3", "memory/2026-01-03.md", "memory", "test-model", 1, 3,
-         "Redis is used for session caching with a 24-hour TTL."),
-        ("id4", "memory/2026-01-04.md", "sessions", "test-model", 1, 2,
-         "PostgreSQL indexes were added to speed up the user query."),
+        (
+            "id1",
+            "memory/2026-01-01.md",
+            "memory",
+            "test-model",
+            1,
+            5,
+            "We chose PostgreSQL for its JSONB support and reliability.",
+        ),
+        (
+            "id2",
+            "memory/2026-01-02.md",
+            "memory",
+            "test-model",
+            1,
+            4,
+            "React was selected as the frontend framework for the dashboard.",
+        ),
+        (
+            "id3",
+            "memory/2026-01-03.md",
+            "memory",
+            "test-model",
+            1,
+            3,
+            "Redis is used for session caching with a 24-hour TTL.",
+        ),
+        (
+            "id4",
+            "memory/2026-01-04.md",
+            "sessions",
+            "test-model",
+            1,
+            2,
+            "PostgreSQL indexes were added to speed up the user query.",
+        ),
     ]
-    await db.executemany(
-        "INSERT INTO chunks VALUES (?, ?, ?, ?, ?, ?, ?)", rows
-    )
+    await db.executemany("INSERT INTO chunks VALUES (?, ?, ?, ?, ?, ?, ?)", rows)
     await db.executemany(
         "INSERT INTO chunks_fts(id, path, source, model, start_line, end_line, text) "
         "VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -290,7 +320,11 @@ class TestKeywordSearch:
         db = await _make_fts_db()
         ks = KeywordSearch()
         rows = await ks.search(
-            db, "PostgreSQL", None, "test-model", limit=10,
+            db,
+            "PostgreSQL",
+            None,
+            "test-model",
+            limit=10,
             source_filter="sessions",
         )
         assert len(rows) == 1

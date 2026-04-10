@@ -49,18 +49,16 @@ async def test_cache_lru_cap(workspace: Path, embedding_model: str) -> None:
         s1 = await mem.status()
 
         assert r1.files_indexed == 6, f"Expected 6 files indexed, got {r1.files_indexed}"
-        assert s1.cache_entries <= 3, (
-            f"Cache should be capped at 3 entries, got {s1.cache_entries}"
-        )
-        assert s1.cache_max_entries == 3, (
-            f"status().cache_max_entries should be 3, got {s1.cache_max_entries}"
-        )
+        assert s1.cache_entries <= 3, f"Cache should be capped at 3 entries, got {s1.cache_entries}"
+        assert (
+            s1.cache_max_entries == 3
+        ), f"status().cache_max_entries should be 3, got {s1.cache_max_entries}"
 
         # Force re-index: 6 files, only 3 still in cache → at least 3 must be recomputed
         r2 = await mem.index(force=True)
-        assert r2.embeddings_computed >= 3, (
-            f"Expected ≥3 recomputed after LRU eviction, got {r2.embeddings_computed}"
-        )
+        assert (
+            r2.embeddings_computed >= 3
+        ), f"Expected ≥3 recomputed after LRU eviction, got {r2.embeddings_computed}"
 
 
 @pytest.mark.asyncio
@@ -75,11 +73,11 @@ async def test_cache_disabled(workspace: Path, embedding_model: str) -> None:
 
     async with MemWeave(config) as mem:
         r1 = await mem.index()
-        assert r1.embeddings_cached == 0, (
-            f"cache.enabled=False should produce 0 cached, got {r1.embeddings_cached}"
-        )
+        assert (
+            r1.embeddings_cached == 0
+        ), f"cache.enabled=False should produce 0 cached, got {r1.embeddings_cached}"
 
         r2 = await mem.index(force=True)
-        assert r2.embeddings_cached == 0, (
-            f"cache.enabled=False force re-index should still produce 0 cached, got {r2.embeddings_cached}"
-        )
+        assert (
+            r2.embeddings_cached == 0
+        ), f"cache.enabled=False force re-index should still produce 0 cached, got {r2.embeddings_cached}"

@@ -28,6 +28,7 @@ def _row(chunk_id: str, score: float) -> RawSearchRow:
 
 # ── PostProcessor protocol ────────────────────────────────────────────────────
 
+
 class TestPostProcessorProtocol:
     def test_score_threshold_is_post_processor(self):
         assert isinstance(ScoreThreshold(), PostProcessor)
@@ -47,6 +48,7 @@ class TestPostProcessorProtocol:
 
     def test_sync_apply_does_not_conform(self):
         """apply must be an async method — sync won't satisfy the protocol."""
+
         class SyncApply:
             def apply(self, rows, query, **kwargs):
                 return rows
@@ -58,6 +60,7 @@ class TestPostProcessorProtocol:
 
 
 # ── ScoreThreshold ────────────────────────────────────────────────────────────
+
 
 class TestScoreThreshold:
     async def test_default_threshold_filters_below_0_35(self):

@@ -44,6 +44,7 @@ def _make_litellm_response(content: str) -> MagicMock:
 
 # ── flush_conversation ────────────────────────────────────────────────────────
 
+
 class TestFlushConversation:
     async def test_silent_reply_returns_none(self, tmp_path: Path):
         """LLM returning @@SILENT_REPLY@@ → returns None, no file written."""
@@ -167,10 +168,12 @@ class TestFlushConversation:
 
 # ── MemWeave.flush() wrapper ─────────────────────────────────────────────────
 
+
 class TestMemWeaveFlush:
     async def test_flush_disabled_returns_none(self, tmp_path: Path):
         """flush.enabled=False → MemWeave.flush() returns None without calling LLM."""
         from memweave.config import EmbeddingConfig
+
         cfg = MemoryConfig(
             workspace_dir=tmp_path,
             embedding=EmbeddingConfig(model="test-embed"),
@@ -178,8 +181,11 @@ class TestMemWeaveFlush:
         )
 
         class FakeProvider:
-            async def embed_query(self, text): return [0.1] * 8
-            async def embed_batch(self, texts): return [[0.1] * 8 for _ in texts]
+            async def embed_query(self, text):
+                return [0.1] * 8
+
+            async def embed_batch(self, texts):
+                return [[0.1] * 8 for _ in texts]
 
         async with MemWeave(cfg, embedding_provider=FakeProvider()) as mem:
             with patch("litellm.acompletion", new_callable=AsyncMock) as mock_llm:

@@ -49,16 +49,18 @@ async def test_query_expansion(workspace: Path, embedding_model: str) -> None:
 
         # All stop words → 0 results, no crash
         r_stops = await mem.search("the a is are", strategy="keyword", min_score=0.0)
-        assert len(r_stops) == 0, (
-            f"Stop-word-only query should return 0 results, got {len(r_stops)}"
-        )
+        assert (
+            len(r_stops) == 0
+        ), f"Stop-word-only query should return 0 results, got {len(r_stops)}"
 
         # More terms (AND semantics) → fewer or equal results
         r_fewer = await mem.search("database ACID", strategy="keyword", min_score=0.01)
-        r_more  = await mem.search("database ACID compliance storage", strategy="keyword", min_score=0.01)
-        assert len(r_fewer) >= len(r_more), (
-            "More required terms should not produce more results (AND semantics)"
+        r_more = await mem.search(
+            "database ACID compliance storage", strategy="keyword", min_score=0.01
         )
+        assert len(r_fewer) >= len(
+            r_more
+        ), "More required terms should not produce more results (AND semantics)"
 
         # Unicode query → no exception raised
         r_unicode = await mem.search("données système 데이터베이스", min_score=0.0)

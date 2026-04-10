@@ -39,7 +39,9 @@ async def test_search_hybrid(workspace: Path, embedding_model: str) -> None:
 
     async with MemWeave(config) as mem:
         await mem.index()
-        results = await mem.search("which database did we choose and why?", max_results=3, min_score=0.1)
+        results = await mem.search(
+            "which database did we choose and why?", max_results=3, min_score=0.1
+        )
 
     assert len(results) > 0, "Expected at least one result"
     assert len(results) <= 3, f"max_results=3 violated: got {len(results)}"

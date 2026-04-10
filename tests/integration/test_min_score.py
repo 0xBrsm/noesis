@@ -48,20 +48,18 @@ async def test_min_score(workspace: Path, embedding_model: str) -> None:
     async with MemWeave(config) as mem:
         await mem.index()
 
-        r_low       = await mem.search(query, min_score=0.0)
-        r_high      = await mem.search(query, min_score=0.5)
+        r_low = await mem.search(query, min_score=0.0)
+        r_high = await mem.search(query, min_score=0.5)
         r_impossible = await mem.search(query, min_score=1.0)
-        r_override  = await mem.search(query, min_score=0.7)
+        r_override = await mem.search(query, min_score=0.7)
 
-    assert len(r_low) >= len(r_high), (
-        f"Higher min_score should return ≤ results: low={len(r_low)} high={len(r_high)}"
-    )
-    assert len(r_impossible) == 0, (
-        f"min_score=1.0 should return 0 results, got {len(r_impossible)}"
-    )
-    assert all(r.score >= 0.5 for r in r_high), (
-        f"Result below min_score=0.5 threshold: {[r.score for r in r_high if r.score < 0.5]}"
-    )
-    assert all(r.score >= 0.7 for r in r_override), (
-        f"Per-call min_score=0.7 override not respected: {[r.score for r in r_override if r.score < 0.7]}"
-    )
+    assert len(r_low) >= len(
+        r_high
+    ), f"Higher min_score should return ≤ results: low={len(r_low)} high={len(r_high)}"
+    assert len(r_impossible) == 0, f"min_score=1.0 should return 0 results, got {len(r_impossible)}"
+    assert all(
+        r.score >= 0.5 for r in r_high
+    ), f"Result below min_score=0.5 threshold: {[r.score for r in r_high if r.score < 0.5]}"
+    assert all(
+        r.score >= 0.7 for r in r_override
+    ), f"Per-call min_score=0.7 override not respected: {[r.score for r in r_override if r.score < 0.7]}"

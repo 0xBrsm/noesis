@@ -22,7 +22,7 @@ from memweave import EmbeddingConfig, MemWeave, MemoryConfig, QueryConfig  # noq
 
 pytestmark = pytest.mark.integration
 
-_OLD_DATE = "2026-02-01"   # ~60 days before 2026-04-01
+_OLD_DATE = "2026-02-01"  # ~60 days before 2026-04-01
 _TODAY_DATE = "2026-04-01"
 _SHARED_CONTENT = (
     "The deployment pipeline uses blue-green switching for zero-downtime releases.\n"
@@ -57,9 +57,9 @@ async def test_temporal_decay(workspace: Path, embedding_model: str) -> None:
         assert new_path in scores, f"{new_path} not found in results"
 
         diff = abs(scores[old_path] - scores[new_path])
-        assert diff < 0.05, (
-            f"Identical content should score similarly without decay, diff={diff:.4f}"
-        )
+        assert (
+            diff < 0.05
+        ), f"Identical content should score similarly without decay, diff={diff:.4f}"
 
         # With aggressive decay (half_life=7d) — 60-day-old file should drop sharply
         # 2^(-60/7) ≈ 0.003 multiplier
@@ -69,8 +69,15 @@ async def test_temporal_decay(workspace: Path, embedding_model: str) -> None:
         old_decay = decay_scores.get(old_path, 0.0)
         new_decay = decay_scores.get(new_path, scores[new_path])
 
-        assert new_decay > old_decay * 5, (
-            f"With half_life=7d, new should score >5× old. new={new_decay:.4f} old={old_decay:.6f}"
+        assert (
+            new_decay > old_decay * 5
+        ), f"With half_life=7d, new should score >5× old. new={new_decay:.4f} old={old_decay:.6f}"
+
+        # Results must be sorted by decayed score descending
+        decay_score_list = [r.score for r in r_decay]
+        assert decay_score_list == sorted(decay_score_list, reverse=True), (
+            f"mem.search() with decay must return results sorted by decayed score. "
+            f"Got: {decay_score_list}"
         )
 
         # Longer half-life preserves more of the old score
@@ -78,6 +85,4 @@ async def test_temporal_decay(workspace: Path, embedding_model: str) -> None:
         long_scores = {r.path: r.score for r in r_long}
         old_long = long_scores.get(old_path, scores[old_path])
 
-        assert old_long > old_decay, (
-            "Longer half-life should preserve more of the old file's score"
-        )
+        assert old_long > old_decay, "Longer half-life should preserve more of the old file's score"

@@ -50,20 +50,22 @@ async def test_search_keyword(workspace: Path, embedding_model: str) -> None:
         # Basic keyword match
         results = await mem.search("PostgreSQL JSONB", strategy="keyword", min_score=0.01)
         assert len(results) > 0, "Expected keyword match for 'PostgreSQL JSONB'"
-        assert results[0].text_score is not None and results[0].text_score > 0, (
-            "text_score must be populated for keyword strategy"
-        )
-        assert results[0].vector_score is None, (
-            "vector_score must be None for pure keyword search"
-        )
+        assert (
+            results[0].text_score is not None and results[0].text_score > 0
+        ), "text_score must be populated for keyword strategy"
+        assert results[0].vector_score is None, "vector_score must be None for pure keyword search"
 
         # More required terms (AND semantics) → fewer or equal results
         r_fewer = await mem.search("database SSPL", strategy="keyword", min_score=0.01)
-        r_more = await mem.search("database SSPL licensing concern", strategy="keyword", min_score=0.01)
-        assert len(r_fewer) >= len(r_more), (
-            "More query terms should not produce more results than fewer terms (AND semantics)"
+        r_more = await mem.search(
+            "database SSPL licensing concern", strategy="keyword", min_score=0.01
         )
+        assert len(r_fewer) >= len(
+            r_more
+        ), "More query terms should not produce more results than fewer terms (AND semantics)"
 
         # All stop words → graceful empty result, no crash
         r_stops = await mem.search("the a is are", strategy="keyword", min_score=0.0)
-        assert len(r_stops) == 0, f"Stop-word-only query should return 0 results, got {len(r_stops)}"
+        assert (
+            len(r_stops) == 0
+        ), f"Stop-word-only query should return 0 results, got {len(r_stops)}"

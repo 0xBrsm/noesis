@@ -34,15 +34,14 @@ async def store():
 
 # ── get_cached_embeddings (bulk) ──────────────────────────────────────────────
 
+
 class TestGetCachedEmbeddings:
     async def test_empty_hashes_returns_empty(self, store):
         result = await get_cached_embeddings(store, [], MODEL, PROVIDER_KEY)
         assert result == {}
 
     async def test_cache_miss_returns_empty(self, store):
-        result = await get_cached_embeddings(
-            store, ["nonexistent_hash"], MODEL, PROVIDER_KEY
-        )
+        result = await get_cached_embeddings(store, ["nonexistent_hash"], MODEL, PROVIDER_KEY)
         assert result == {}
 
     async def test_cache_hit_returns_vector(self, store):
@@ -86,6 +85,7 @@ class TestGetCachedEmbeddings:
 
 # ── get_cached_embedding (single) ────────────────────────────────────────────
 
+
 class TestGetCachedEmbedding:
     async def test_miss_returns_none(self, store):
         result = await get_cached_embedding(store, "unknown text", MODEL, PROVIDER_KEY)
@@ -103,6 +103,7 @@ class TestGetCachedEmbedding:
 
 
 # ── store_embedding ───────────────────────────────────────────────────────────
+
 
 class TestStoreEmbedding:
     async def test_store_and_retrieve(self, store):
@@ -147,6 +148,7 @@ class TestStoreEmbedding:
 
 # ── store_embeddings_bulk ─────────────────────────────────────────────────────
 
+
 class TestStoreEmbeddingsBulk:
     async def test_stores_all(self, store):
         data = {sha256_text(f"text{i}"): [float(i)] * 4 for i in range(10)}
@@ -162,6 +164,7 @@ class TestStoreEmbeddingsBulk:
 
 
 # ── evict_cache_if_needed ─────────────────────────────────────────────────────
+
 
 class TestEvictCacheIfNeeded:
     async def test_none_max_entries_skips_eviction(self, store):
@@ -184,6 +187,7 @@ class TestEvictCacheIfNeeded:
 
     async def test_exceeds_cap_evicts_oldest(self, store):
         import asyncio
+
         for i in range(5):
             await store_embedding(store, sha256_text(f"t{i}"), [float(i)], MODEL, PROVIDER_KEY)
             await store.commit()
@@ -197,6 +201,7 @@ class TestEvictCacheIfNeeded:
 
 
 # ── split_into_hits_and_misses ────────────────────────────────────────────────
+
 
 class TestSplitIntoHitsAndMisses:
     def test_all_misses(self):
@@ -236,6 +241,7 @@ class TestSplitIntoHitsAndMisses:
 
 
 # ── merge_embeddings ──────────────────────────────────────────────────────────
+
 
 class TestMergeEmbeddings:
     def test_all_misses_no_hits(self):

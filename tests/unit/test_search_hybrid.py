@@ -15,7 +15,14 @@ from memweave.search.hybrid import HybridSearch, merge_hybrid_results
 from memweave.search.strategy import RawSearchRow, SearchStrategy
 
 
-def row(chunk_id: str, score: float, *, vs: float | None = None, ts: float | None = None, text: str = "text") -> RawSearchRow:
+def row(
+    chunk_id: str,
+    score: float,
+    *,
+    vs: float | None = None,
+    ts: float | None = None,
+    text: str = "text",
+) -> RawSearchRow:
     """Convenience constructor for test rows."""
     return RawSearchRow(
         chunk_id=chunk_id,
@@ -31,6 +38,7 @@ def row(chunk_id: str, score: float, *, vs: float | None = None, ts: float | Non
 
 
 # ── merge_hybrid_results ──────────────────────────────────────────────────────
+
 
 class TestMergeHybridResults:
     def test_vector_only_input(self):
@@ -57,9 +65,7 @@ class TestMergeHybridResults:
         """Chunk in both backends: combined = vector_weight*vs + text_weight*ts."""
         vec_rows = [row("id1", 0.9, vs=0.9)]
         kw_rows = [row("id1", 0.6, ts=0.6)]
-        result = merge_hybrid_results(
-            vec_rows, kw_rows, vector_weight=0.7, text_weight=0.3
-        )
+        result = merge_hybrid_results(vec_rows, kw_rows, vector_weight=0.7, text_weight=0.3)
         assert len(result) == 1
         # 0.7 * 0.9 + 0.3 * 0.6 = 0.63 + 0.18 = 0.81
         assert abs(result[0].score - 0.81) < 1e-9
@@ -68,13 +74,11 @@ class TestMergeHybridResults:
         """Union: each backend contributes its unique chunks with 0 for missing."""
         vec_rows = [row("id1", 0.9, vs=0.9)]
         kw_rows = [row("id2", 0.8, ts=0.8)]
-        result = merge_hybrid_results(
-            vec_rows, kw_rows, vector_weight=0.7, text_weight=0.3
-        )
+        result = merge_hybrid_results(vec_rows, kw_rows, vector_weight=0.7, text_weight=0.3)
         assert len(result) == 2
         scores = {r.chunk_id: r.score for r in result}
-        assert abs(scores["id1"] - 0.63) < 1e-9   # 0.7*0.9 + 0.3*0
-        assert abs(scores["id2"] - 0.24) < 1e-9   # 0.7*0 + 0.3*0.8
+        assert abs(scores["id1"] - 0.63) < 1e-9  # 0.7*0.9 + 0.3*0
+        assert abs(scores["id2"] - 0.24) < 1e-9  # 0.7*0 + 0.3*0.8
 
     def test_ordered_by_score_descending(self):
         vec_rows = [row("low", 0.2, vs=0.2), row("high", 0.9, vs=0.9)]
@@ -127,9 +131,7 @@ class TestMergeHybridResults:
         """With 0.5/0.5 weights, chunks from both backends are weighted equally."""
         vec_rows = [row("id1", 0.8, vs=0.8)]
         kw_rows = [row("id1", 0.8, ts=0.8)]
-        result = merge_hybrid_results(
-            vec_rows, kw_rows, vector_weight=0.5, text_weight=0.5
-        )
+        result = merge_hybrid_results(vec_rows, kw_rows, vector_weight=0.5, text_weight=0.5)
         # 0.5*0.8 + 0.5*0.8 = 0.8
         assert abs(result[0].score - 0.8) < 1e-9
 
@@ -137,9 +139,7 @@ class TestMergeHybridResults:
         """Weights don't need to sum to 1 — formula is a plain weighted sum."""
         vec_rows = [row("id1", 1.0, vs=1.0)]
         kw_rows = [row("id1", 1.0, ts=1.0)]
-        result = merge_hybrid_results(
-            vec_rows, kw_rows, vector_weight=0.6, text_weight=0.6
-        )
+        result = merge_hybrid_results(vec_rows, kw_rows, vector_weight=0.6, text_weight=0.6)
         assert abs(result[0].score - 1.2) < 1e-9
 
     def test_large_candidate_pool_deduped_correctly(self):
@@ -162,6 +162,7 @@ class TestMergeHybridResults:
 
 
 # ── HybridSearch protocol conformance ────────────────────────────────────────
+
 
 class TestHybridSearchProtocol:
     def test_conforms_to_search_strategy(self):

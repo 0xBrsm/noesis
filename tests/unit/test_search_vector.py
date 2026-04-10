@@ -23,8 +23,8 @@ from memweave.search.vector import (
 )
 from memweave.embedding.vectors import normalize_embedding
 
-
 # ── _vec_to_blob ──────────────────────────────────────────────────────────────
+
 
 class TestVecToBlob:
     def test_two_element_vector(self):
@@ -56,6 +56,7 @@ class TestVecToBlob:
 
 # ── VectorSearchUnavailableError ──────────────────────────────────────────────
 
+
 class TestVectorSearchUnavailable:
     async def test_raises_when_sqlite_vec_not_loaded(self):
         """A plain DB connection without sqlite-vec should raise."""
@@ -84,9 +85,11 @@ class TestVectorSearchUnavailable:
 
 # ── VectorSearch with sqlite-vec ──────────────────────────────────────────────
 
+
 def _sqlite_vec_available() -> bool:
     try:
         import sqlite_vec  # noqa: F401
+
         return True
     except ImportError:
         return False
@@ -137,7 +140,15 @@ async def _make_vec_db(dims: int = 4) -> aiosqlite.Connection:
     for chunk_id, vec in vecs.items():
         await db.execute(
             "INSERT INTO chunks VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (chunk_id, f"memory/{chunk_id}.md", "memory", "test-model", 1, 3, f"text for {chunk_id}"),
+            (
+                chunk_id,
+                f"memory/{chunk_id}.md",
+                "memory",
+                "test-model",
+                1,
+                3,
+                f"text for {chunk_id}",
+            ),
         )
         await db.execute(
             "INSERT INTO chunks_vec(id, embedding) VALUES (?, ?)",
@@ -210,13 +221,11 @@ class TestVectorSearch:
                 model TEXT, start_line INTEGER, end_line INTEGER, text TEXT
             )
         """)
-        await db.execute("CREATE VIRTUAL TABLE chunks_vec USING vec0(id TEXT PRIMARY KEY, embedding FLOAT[2])")
         await db.execute(
-            "INSERT INTO chunks VALUES ('a','p','memory','m',1,1,'t')"
+            "CREATE VIRTUAL TABLE chunks_vec USING vec0(id TEXT PRIMARY KEY, embedding FLOAT[2])"
         )
-        await db.execute(
-            "INSERT INTO chunks VALUES ('b','p','sessions','m',1,1,'t')"
-        )
+        await db.execute("INSERT INTO chunks VALUES ('a','p','memory','m',1,1,'t')")
+        await db.execute("INSERT INTO chunks VALUES ('b','p','sessions','m',1,1,'t')")
         vec = normalize_embedding([1.0, 0.0])
         await db.execute("INSERT INTO chunks_vec VALUES ('a', ?)", (_vec_to_blob(vec),))
         await db.execute("INSERT INTO chunks_vec VALUES ('b', ?)", (_vec_to_blob(vec),))

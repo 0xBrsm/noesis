@@ -8,8 +8,8 @@ import math
 
 from memweave.embedding.vectors import normalize_embedding
 
-
 # ── normalize_embedding ───────────────────────────────────────────────────────
+
 
 class TestNormalizeEmbedding:
     def test_unit_vector_unchanged(self):
@@ -52,6 +52,7 @@ class TestNormalizeEmbedding:
     def test_large_vector(self):
         """1536-dimensional vector should normalize cleanly."""
         import random
+
         rng = random.Random(42)
         v = [rng.gauss(0, 1) for _ in range(1536)]
         result = normalize_embedding(v)

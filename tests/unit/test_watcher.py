@@ -16,8 +16,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-
 # ── _filter_md_changes ────────────────────────────────────────────────────────
+
 
 class TestFilterMdChanges:
     def _make_watcher(self, tmp_path: Path):
@@ -27,7 +27,9 @@ class TestFilterMdChanges:
         except ImportError:
             pytest.skip("watchfiles not installed")
 
-        async def noop(paths): pass
+        async def noop(paths):
+            pass
+
         return MemoryWatcher(
             workspace_dir=tmp_path,
             on_change=noop,
@@ -37,6 +39,7 @@ class TestFilterMdChanges:
     def test_md_files_included(self, tmp_path: Path):
         watcher = self._make_watcher(tmp_path)
         from watchfiles import Change  # type: ignore[import-untyped]
+
         changes = {
             (Change.modified, str(tmp_path / "memory" / "2026-01-01.md")),
         }
@@ -46,6 +49,7 @@ class TestFilterMdChanges:
     def test_non_md_files_excluded(self, tmp_path: Path):
         watcher = self._make_watcher(tmp_path)
         from watchfiles import Change  # type: ignore[import-untyped]
+
         changes = {
             (Change.modified, str(tmp_path / "memory" / "data.json")),
             (Change.modified, str(tmp_path / "memory" / "image.png")),
@@ -56,6 +60,7 @@ class TestFilterMdChanges:
     def test_memweave_internals_excluded(self, tmp_path: Path):
         watcher = self._make_watcher(tmp_path)
         from watchfiles import Change  # type: ignore[import-untyped]
+
         changes = {
             (Change.modified, str(tmp_path / ".memweave" / "index.sqlite")),
         }
@@ -65,6 +70,7 @@ class TestFilterMdChanges:
     def test_mixed_changes_only_md_returned(self, tmp_path: Path):
         watcher = self._make_watcher(tmp_path)
         from watchfiles import Change  # type: ignore[import-untyped]
+
         changes = {
             (Change.modified, str(tmp_path / "memory" / "2026-01-01.md")),
             (Change.modified, str(tmp_path / "memory" / "README.txt")),
@@ -81,6 +87,7 @@ class TestFilterMdChanges:
 
 # ── MemoryWatcher construction ────────────────────────────────────────────────
 
+
 class TestMemoryWatcherConstruction:
     def test_raises_without_watchfiles(self, tmp_path: Path):
         """ImportError when watchfiles is not installed."""
@@ -88,11 +95,15 @@ class TestMemoryWatcherConstruction:
             # Force re-import with watchfiles unavailable
             import importlib
             import memweave.sync.watcher as wmod
+
             original = wmod._WATCHFILES_AVAILABLE
             wmod._WATCHFILES_AVAILABLE = False
             try:
                 from memweave.sync.watcher import MemoryWatcher
-                async def noop(paths): pass
+
+                async def noop(paths):
+                    pass
+
                 with pytest.raises(ImportError, match="watchfiles"):
                     MemoryWatcher(workspace_dir=tmp_path, on_change=noop)
             finally:
@@ -100,6 +111,7 @@ class TestMemoryWatcherConstruction:
 
 
 # ── MemoryWatcher.run ─────────────────────────────────────────────────────────
+
 
 class TestMemoryWatcherRun:
     async def test_run_cancelled_cleanly(self, tmp_path: Path):
@@ -122,6 +134,7 @@ class TestMemoryWatcherRun:
 
         # Mock watchfiles.awatch to yield one change then block
         from watchfiles import Change  # type: ignore[import-untyped]
+
         md_path = tmp_path / "memory" / "test.md"
 
         async def fake_awatch(*args, **kwargs):
@@ -155,6 +168,7 @@ class TestMemoryWatcherRun:
         )
 
         from watchfiles import Change  # type: ignore[import-untyped]
+
         md_path = tmp_path / "memory" / "2026-01-01.md"
 
         async def fake_awatch(*args, **kwargs):
@@ -174,6 +188,7 @@ class TestMemoryWatcherRun:
 
 # ── MemWeave.start_watching ───────────────────────────────────────────────────
 
+
 class TestStartWatching:
     async def test_start_watching_no_watchfiles_logs_warning(self, tmp_path: Path):
         """If watchfiles is missing, start_watching logs a warning and returns."""
@@ -186,8 +201,11 @@ class TestStartWatching:
         )
 
         class FakeProvider:
-            async def embed_query(self, text): return [0.1] * 8
-            async def embed_batch(self, texts): return [[0.1] * 8 for _ in texts]
+            async def embed_query(self, text):
+                return [0.1] * 8
+
+            async def embed_batch(self, texts):
+                return [[0.1] * 8 for _ in texts]
 
         from memweave.store import MemWeave
 
@@ -215,8 +233,11 @@ class TestStartWatching:
         )
 
         class FakeProvider:
-            async def embed_query(self, text): return [0.1] * 8
-            async def embed_batch(self, texts): return [[0.1] * 8 for _ in texts]
+            async def embed_query(self, text):
+                return [0.1] * 8
+
+            async def embed_batch(self, texts):
+                return [[0.1] * 8 for _ in texts]
 
         async def fake_run(self):
             await asyncio.sleep(9999)

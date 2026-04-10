@@ -66,16 +66,16 @@ async def test_source_filter(workspace: Path, embedding_model: str) -> None:
         # memory only
         r_memory = await mem.search(query, source_filter="memory", min_score=0.0)
         assert len(r_memory) > 0, "Expected memory-source results"
-        assert all(r.source == "memory" for r in r_memory), (
-            f"Non-memory source leaked in: {[r.source for r in r_memory]}"
-        )
+        assert all(
+            r.source == "memory" for r in r_memory
+        ), f"Non-memory source leaked in: {[r.source for r in r_memory]}"
 
         # sessions only
         r_sessions = await mem.search(query, source_filter="sessions", min_score=0.0)
         assert len(r_sessions) > 0, "Expected sessions-source results"
-        assert all(r.source == "sessions" for r in r_sessions), (
-            f"Non-sessions source leaked in: {[r.source for r in r_sessions]}"
-        )
+        assert all(
+            r.source == "sessions" for r in r_sessions
+        ), f"Non-sessions source leaked in: {[r.source for r in r_sessions]}"
 
         # unfiltered >= either filtered set
         assert len(r_all) >= max(len(r_memory), len(r_sessions))

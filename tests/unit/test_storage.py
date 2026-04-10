@@ -22,8 +22,8 @@ from memweave.storage.files import (
 from memweave.storage.schema import ensure_schema, get_schema_version
 from memweave.storage.sqlite_store import SQLiteStore
 
-
 # ── Fixtures ──────────────────────────────────────────────────────────────────
+
 
 @pytest_asyncio.fixture
 async def db():
@@ -41,6 +41,7 @@ async def store(db):
 
 
 # ── schema tests ──────────────────────────────────────────────────────────────
+
 
 class TestSchema:
     @pytest.mark.asyncio
@@ -93,6 +94,7 @@ class TestSchema:
 
 # ── SQLiteStore meta tests ────────────────────────────────────────────────────
 
+
 class TestSQLiteStoreMeta:
     @pytest.mark.asyncio
     async def test_set_and_get_meta(self, store, db):
@@ -124,6 +126,7 @@ class TestSQLiteStoreMeta:
 
 
 # ── SQLiteStore files tests ───────────────────────────────────────────────────
+
 
 class TestSQLiteStoreFiles:
     @pytest.mark.asyncio
@@ -166,6 +169,7 @@ class TestSQLiteStoreFiles:
 
 # ── SQLiteStore chunks tests ──────────────────────────────────────────────────
 
+
 class TestSQLiteStoreChunks:
     @pytest.mark.asyncio
     async def test_upsert_and_get_chunk(self, store, db):
@@ -197,9 +201,15 @@ class TestSQLiteStoreChunks:
     @pytest.mark.asyncio
     async def test_chunk_without_embedding(self, store, db):
         await store.upsert_chunk(
-            id_="c2", path="memory/test.md", source="memory",
-            start_line=1, end_line=2, hash_="h", model="model",
-            text="text", embedding=None,
+            id_="c2",
+            path="memory/test.md",
+            source="memory",
+            start_line=1,
+            end_line=2,
+            hash_="h",
+            model="model",
+            text="text",
+            embedding=None,
         )
         await store.commit()
         record = await store.get_chunk("c2")
@@ -208,14 +218,26 @@ class TestSQLiteStoreChunks:
     @pytest.mark.asyncio
     async def test_delete_chunks_by_path(self, store, db):
         await store.upsert_chunk(
-            id_="c1", path="memory/a.md", source="memory",
-            start_line=1, end_line=2, hash_="h1", model="m",
-            text="t1", embedding=None,
+            id_="c1",
+            path="memory/a.md",
+            source="memory",
+            start_line=1,
+            end_line=2,
+            hash_="h1",
+            model="m",
+            text="t1",
+            embedding=None,
         )
         await store.upsert_chunk(
-            id_="c2", path="memory/a.md", source="memory",
-            start_line=3, end_line=4, hash_="h2", model="m",
-            text="t2", embedding=None,
+            id_="c2",
+            path="memory/a.md",
+            source="memory",
+            start_line=3,
+            end_line=4,
+            hash_="h2",
+            model="m",
+            text="t2",
+            embedding=None,
         )
         await store.commit()
         deleted = await store.delete_chunks_by_path("memory/a.md")
@@ -227,15 +249,22 @@ class TestSQLiteStoreChunks:
     async def test_count_chunks(self, store, db):
         assert await store.count_chunks() == 0
         await store.upsert_chunk(
-            id_="c1", path="p", source="memory",
-            start_line=1, end_line=2, hash_="h", model="m",
-            text="t", embedding=None,
+            id_="c1",
+            path="p",
+            source="memory",
+            start_line=1,
+            end_line=2,
+            hash_="h",
+            model="m",
+            text="t",
+            embedding=None,
         )
         await store.commit()
         assert await store.count_chunks() == 1
 
 
 # ── SQLiteStore FTS tests ─────────────────────────────────────────────────────
+
 
 class TestSQLiteStoreFTS:
     @pytest.mark.asyncio
@@ -250,9 +279,7 @@ class TestSQLiteStoreFTS:
         )
         await store.commit()
 
-        cursor = await db.execute(
-            "SELECT id FROM chunks_fts WHERE chunks_fts MATCH 'PostgreSQL'"
-        )
+        cursor = await db.execute("SELECT id FROM chunks_fts WHERE chunks_fts MATCH 'PostgreSQL'")
         rows = await cursor.fetchall()
         assert any(row[0] == "c1" for row in rows)
 
@@ -267,6 +294,7 @@ class TestSQLiteStoreFTS:
 
 
 # ── SQLiteStore embedding cache tests ────────────────────────────────────────
+
 
 class TestSQLiteStoreEmbeddingCache:
     @pytest.mark.asyncio
@@ -310,6 +338,7 @@ class TestSQLiteStoreEmbeddingCache:
 
 
 # ── storage/files.py tests ───────────────────────────────────────────────────
+
 
 class TestListMemoryFiles:
     def test_finds_md_files(self, tmp_path):

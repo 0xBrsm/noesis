@@ -127,7 +127,9 @@ class TestRunWithConcurrency:
             results.append(i)
             return i
 
-        output = await run_with_concurrency([lambda i=i: task(i) for i in range(5)], max_concurrent=2)
+        output = await run_with_concurrency(
+            [lambda i=i: task(i) for i in range(5)], max_concurrent=2
+        )
         assert sorted(output) == [0, 1, 2, 3, 4]
 
     @pytest.mark.asyncio
@@ -135,7 +137,9 @@ class TestRunWithConcurrency:
         async def task(i: int) -> int:
             return i * 2
 
-        output = await run_with_concurrency([lambda i=i: task(i) for i in range(5)], max_concurrent=3)
+        output = await run_with_concurrency(
+            [lambda i=i: task(i) for i in range(5)], max_concurrent=3
+        )
         assert output == [0, 2, 4, 6, 8]
 
     @pytest.mark.asyncio
