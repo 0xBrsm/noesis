@@ -66,15 +66,15 @@ async def test_files_api(workspace: Path, embedding_model: str) -> None:
         # Chunk sum must match status().chunks
         status = await mem.status()
         total_chunks = sum(f.chunks for f in file_list)
-        assert total_chunks == status.chunks, (
-            f"Chunk count mismatch: files()={total_chunks} vs status()={status.chunks}"
-        )
+        assert (
+            total_chunks == status.chunks
+        ), f"Chunk count mismatch: files()={total_chunks} vs status()={status.chunks}"
 
         # add() must be reflected in files() immediately
         new_file = mem_dir / "new_note.md"
         new_file.write_text("New decision: adopt OpenTelemetry for distributed tracing.\n")
         await mem.add(new_file)
         paths_after = [f.path for f in await mem.files()]
-        assert any("new_note" in p for p in paths_after), (
-            f"new_note.md not found in files() after add(): {paths_after}"
-        )
+        assert any(
+            "new_note" in p for p in paths_after
+        ), f"new_note.md not found in files() after add(): {paths_after}"

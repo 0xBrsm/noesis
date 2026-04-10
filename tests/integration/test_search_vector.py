@@ -41,18 +41,18 @@ async def test_search_vector(workspace: Path, embedding_model: str) -> None:
         await mem.index()
 
         # Paraphrased query — no exact term overlap with stored content
-        results = await mem.search("UI framework selection decision", strategy="vector", min_score=0.01)
+        results = await mem.search(
+            "UI framework selection decision", strategy="vector", min_score=0.01
+        )
 
     assert len(results) > 0, "Expected semantic match for paraphrased query, got none"
-    assert results[0].vector_score is not None and results[0].vector_score > 0, (
-        "vector_score must be populated for vector strategy"
-    )
-    assert results[0].text_score is None, (
-        "text_score must be None for pure vector search"
-    )
+    assert (
+        results[0].vector_score is not None and results[0].vector_score > 0
+    ), "vector_score must be populated for vector strategy"
+    assert results[0].text_score is None, "text_score must be None for pure vector search"
 
     top_snippet = results[0].snippet.lower()
     relevant_terms = ["react", "vue", "next", "frontend", "framework"]
-    assert any(t in top_snippet for t in relevant_terms), (
-        f"Top result doesn't seem semantically relevant. Snippet: {results[0].snippet[:200]}"
-    )
+    assert any(
+        t in top_snippet for t in relevant_terms
+    ), f"Top result doesn't seem semantically relevant. Snippet: {results[0].snippet[:200]}"

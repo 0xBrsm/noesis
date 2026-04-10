@@ -82,6 +82,6 @@ async def test_mmr_diversity(workspace: Path, embedding_model: str) -> None:
 
     paths_relevance = {r.path for r in r_relevance}
     paths_diversity = {r.path for r in r_diversity}
-    assert paths_relevance != paths_diversity, (
-        "mmr_lambda=0.0 and mmr_lambda=1.0 should produce different result sets"
-    )
+    assert (
+        paths_relevance != paths_diversity
+    ), "mmr_lambda=0.0 and mmr_lambda=1.0 should produce different result sets"

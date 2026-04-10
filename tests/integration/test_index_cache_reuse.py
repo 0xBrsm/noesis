@@ -48,9 +48,9 @@ async def test_index_cache_reuse(workspace: Path, embedding_model: str) -> None:
 
         r2 = await mem.index()
 
-        assert r2.files_skipped == r2.files_scanned, (
-            f"All unchanged files should be skipped: scanned={r2.files_scanned} skipped={r2.files_skipped}"
-        )
-        assert r2.embeddings_computed == 0, (
-            f"No new embeddings should be computed on unchanged re-index, got {r2.embeddings_computed}"
-        )
+        assert (
+            r2.files_skipped == r2.files_scanned
+        ), f"All unchanged files should be skipped: scanned={r2.files_scanned} skipped={r2.files_skipped}"
+        assert (
+            r2.embeddings_computed == 0
+        ), f"No new embeddings should be computed on unchanged re-index, got {r2.embeddings_computed}"

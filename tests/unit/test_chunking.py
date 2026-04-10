@@ -10,8 +10,8 @@ import pytest
 
 from memweave.chunking.markdown import MarkdownChunk, chunk_markdown, chunk_text
 
-
 # ── Basic structure ───────────────────────────────────────────────────────────
+
 
 class TestChunkMarkdownBasic:
     def test_empty_string_returns_empty(self):
@@ -68,6 +68,7 @@ class TestChunkMarkdownBasic:
 
 # ── Splitting behavior ────────────────────────────────────────────────────────
 
+
 class TestChunkMarkdownSplitting:
     def test_long_document_splits_into_multiple_chunks(self):
         """A document larger than max_chars should produce > 1 chunk."""
@@ -92,9 +93,9 @@ class TestChunkMarkdownSplitting:
         text = "\n".join(f"Line {i}" for i in range(1, 100))
         chunks = chunk_markdown(text, chunk_tokens=30, chunk_overlap=5)
         for c in chunks:
-            assert c.start_line <= c.end_line, (
-                f"Chunk has start_line={c.start_line} > end_line={c.end_line}"
-            )
+            assert (
+                c.start_line <= c.end_line
+            ), f"Chunk has start_line={c.start_line} > end_line={c.end_line}"
 
     def test_chunks_are_in_document_order(self):
         """Chunk start lines should be non-decreasing."""
@@ -116,6 +117,7 @@ class TestChunkMarkdownSplitting:
 
 # ── Overlap behavior ──────────────────────────────────────────────────────────
 
+
 class TestChunkMarkdownOverlap:
     def test_no_overlap_zero(self):
         """With overlap=0, consecutive chunks should NOT share lines."""
@@ -125,9 +127,9 @@ class TestChunkMarkdownOverlap:
         chunks = chunk_markdown(text, chunk_tokens=10, chunk_overlap=0)
         if len(chunks) > 1:
             # end_line of chunk N should be < start_line of chunk N+1
-            assert chunks[0].end_line < chunks[1].start_line, (
-                "No-overlap chunks should not share lines"
-            )
+            assert (
+                chunks[0].end_line < chunks[1].start_line
+            ), "No-overlap chunks should not share lines"
 
     def test_overlap_shares_content(self):
         """With overlap > 0, consecutive chunks should share some content."""
@@ -162,6 +164,7 @@ class TestChunkMarkdownOverlap:
 
 # ── Sub-line splitting (very long lines) ─────────────────────────────────────
 
+
 class TestChunkMarkdownLongLines:
     def test_very_long_single_line_splits(self):
         """A single line longer than max_chars should be split into segments."""
@@ -192,6 +195,7 @@ class TestChunkMarkdownLongLines:
 
 
 # ── Edge cases ────────────────────────────────────────────────────────────────
+
 
 class TestChunkMarkdownEdgeCases:
     def test_single_character(self):
@@ -257,6 +261,7 @@ class TestChunkMarkdownEdgeCases:
 
 # ── chunk_text convenience function ──────────────────────────────────────────
 
+
 class TestChunkText:
     def test_returns_strings_only(self):
         """chunk_text should return list[str], not list[MarkdownChunk]."""
@@ -274,6 +279,7 @@ class TestChunkText:
 
 
 # ── Exact algorithm verification ─────────────────────────────────────────────
+
 
 class TestChunkMarkdownAlgorithmVerification:
     """Verify specific algorithm behaviors against known-good outputs.
@@ -309,7 +315,7 @@ class TestChunkMarkdownAlgorithmVerification:
         """Flush must trigger when adding next line would overflow max_chars."""
         # max_chars=32 (tokens=1). A line of 31 chars + '\n' = 32 chars exactly fills one chunk.
         # Adding another line should trigger flush.
-        line_31 = "A" * 31   # 31 chars + 1 '\n' = 32 = exactly max_chars
+        line_31 = "A" * 31  # 31 chars + 1 '\n' = 32 = exactly max_chars
         text = "\n".join([line_31, line_31, line_31])
         chunks = chunk_markdown(text, chunk_tokens=1, chunk_overlap=0)
         # Each 31-char line should be in its own chunk

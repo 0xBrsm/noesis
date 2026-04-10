@@ -75,9 +75,9 @@ async def test_custom_strategy(workspace: Path, embedding_model: str) -> None:
 
         results = await mem.search("anything", strategy="my-custom", min_score=0.0)
         assert len(results) == 1, f"Expected 1 result from custom strategy, got {len(results)}"
-        assert results[0].snippet == _SENTINEL, (
-            f"Expected sentinel text, got: {results[0].snippet!r}"
-        )
+        assert (
+            results[0].snippet == _SENTINEL
+        ), f"Expected sentinel text, got: {results[0].snippet!r}"
         assert results[0].path == "custom/injected.md"
 
         # Unknown strategy → SearchError

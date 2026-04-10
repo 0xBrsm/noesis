@@ -21,7 +21,13 @@ from dotenv import load_dotenv
 
 load_dotenv("./.env")
 
-from memweave import EmbeddingConfig, HybridConfig, MemWeave, MemoryConfig, QueryConfig  # noqa: E402
+from memweave import (
+    EmbeddingConfig,
+    HybridConfig,
+    MemWeave,
+    MemoryConfig,
+    QueryConfig,
+)  # noqa: E402
 
 pytestmark = pytest.mark.integration
 
@@ -53,29 +59,26 @@ async def test_strategy_comparison(workspace: Path, embedding_model: str) -> Non
     async with MemWeave(config) as mem:
         await mem.index()
 
-        r_hybrid  = await mem.search(query, strategy="hybrid",  min_score=0.0)
-        r_vector  = await mem.search(query, strategy="vector",  min_score=0.0)
+        r_hybrid = await mem.search(query, strategy="hybrid", min_score=0.0)
+        r_vector = await mem.search(query, strategy="vector", min_score=0.0)
         r_keyword = await mem.search(query, strategy="keyword", min_score=0.0)
 
-    assert len(r_hybrid)  > 0, "hybrid returned no results"
-    assert len(r_vector)  > 0, "vector returned no results"
+    assert len(r_hybrid) > 0, "hybrid returned no results"
+    assert len(r_vector) > 0, "vector returned no results"
     assert len(r_keyword) > 0, "keyword returned no results"
 
     # Each strategy follows its own scoring path — scores must not all be identical
-    top_hybrid  = r_hybrid[0].score
-    top_vector  = r_vector[0].score
+    top_hybrid = r_hybrid[0].score
+    top_vector = r_vector[0].score
     top_keyword = r_keyword[0].score
-    all_same = (
-        abs(top_hybrid - top_vector) < 1e-6
-        and abs(top_hybrid - top_keyword) < 1e-6
-    )
+    all_same = abs(top_hybrid - top_vector) < 1e-6 and abs(top_hybrid - top_keyword) < 1e-6
     assert not all_same, "All three strategies returned identical top scores — unlikely"
 
     # Score field contract per strategy
     assert r_keyword[0].text_score is not None, "keyword: text_score must be populated"
-    assert r_keyword[0].vector_score is None,   "keyword: vector_score must be None"
+    assert r_keyword[0].vector_score is None, "keyword: vector_score must be None"
     assert r_vector[0].vector_score is not None, "vector: vector_score must be populated"
-    assert r_vector[0].text_score is None,       "vector: text_score must be None"
+    assert r_vector[0].text_score is None, "vector: text_score must be None"
 
     # Vector-heavy hybrid should score closer to pure-vector than balanced hybrid
     vheavy_config = MemoryConfig(
@@ -89,8 +92,8 @@ async def test_strategy_comparison(workspace: Path, embedding_model: str) -> Non
     async with MemWeave(vheavy_config) as mem:
         r_vheavy = await mem.search(query, min_score=0.0)
 
-    diff_vheavy   = abs(r_vheavy[0].score  - top_vector)
+    diff_vheavy = abs(r_vheavy[0].score - top_vector)
     diff_balanced = abs(top_hybrid - top_vector)
-    assert diff_vheavy <= diff_balanced + 0.05, (
-        "Vector-heavy hybrid should be at least as close to pure-vector as balanced hybrid"
-    )
+    assert (
+        diff_vheavy <= diff_balanced + 0.05
+    ), "Vector-heavy hybrid should be at least as close to pure-vector as balanced hybrid"

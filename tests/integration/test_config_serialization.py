@@ -86,5 +86,3 @@ def test_partial_dict_uses_defaults(tmp_path: Path) -> None:
     minimal = MemoryConfig.from_dict({"workspace_dir": str(tmp_path)})
     assert minimal.query.max_results == 6, "Missing field should use dataclass default"
     assert minimal.cache.enabled is True
-
-

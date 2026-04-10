@@ -54,17 +54,15 @@ async def test_snippet_truncation(workspace: Path, embedding_model: str) -> None
         r_default = await mem.search(query, min_score=0.0)
 
     assert len(r100) > 0, "Expected results with snippet_max_chars=100"
-    assert all(len(r.snippet) <= 100 for r in r100), (
-        f"Snippet exceeds 100 chars: {[len(r.snippet) for r in r100 if len(r.snippet) > 100]}"
-    )
+    assert all(
+        len(r.snippet) <= 100 for r in r100
+    ), f"Snippet exceeds 100 chars: {[len(r.snippet) for r in r100 if len(r.snippet) > 100]}"
     assert all(r.snippet for r in r100), "Empty snippet found"
 
     assert len(r2000) > 0, "Expected results with snippet_max_chars=2000"
     assert all(len(r.snippet) <= 2000 for r in r2000), "Snippet exceeds 2000 chars"
-    assert max(len(r.snippet) for r in r2000) >= max(len(r.snippet) for r in r100), (
-        "Larger snippet_max_chars should allow longer snippets"
-    )
+    assert max(len(r.snippet) for r in r2000) >= max(
+        len(r.snippet) for r in r100
+    ), "Larger snippet_max_chars should allow longer snippets"
 
-    assert all(len(r.snippet) <= 700 for r in r_default), (
-        "Default 700-char cap violated"
-    )
+    assert all(len(r.snippet) <= 700 for r in r_default), "Default 700-char cap violated"

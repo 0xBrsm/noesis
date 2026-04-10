@@ -30,7 +30,7 @@ from memweave import (  # noqa: E402
 
 pytestmark = pytest.mark.integration
 
-_OLD_DATE = "2026-02-01"   # ~60 days before 2026-04-01
+_OLD_DATE = "2026-02-01"  # ~60 days before 2026-04-01
 _TODAY_DATE = "2026-04-01"
 
 _TOPIC_AUTH = (
@@ -66,22 +66,28 @@ async def test_postprocessors_combined(workspace: Path, embedding_model: str) ->
         r_baseline = await mem.search(query, min_score=0.0)
 
     # Decay only
-    async with MemWeave(_base_config(
-        temporal_decay=TemporalDecayConfig(enabled=True, half_life_days=14.0),
-    )) as mem:
+    async with MemWeave(
+        _base_config(
+            temporal_decay=TemporalDecayConfig(enabled=True, half_life_days=14.0),
+        )
+    ) as mem:
         r_decay = await mem.search(query, min_score=0.0)
 
     # MMR only
-    async with MemWeave(_base_config(
-        mmr=MMRConfig(enabled=True, lambda_param=0.5),
-    )) as mem:
+    async with MemWeave(
+        _base_config(
+            mmr=MMRConfig(enabled=True, lambda_param=0.5),
+        )
+    ) as mem:
         r_mmr = await mem.search(query, min_score=0.0)
 
     # Combined: decay + MMR
-    async with MemWeave(_base_config(
-        temporal_decay=TemporalDecayConfig(enabled=True, half_life_days=14.0),
-        mmr=MMRConfig(enabled=True, lambda_param=0.5),
-    )) as mem:
+    async with MemWeave(
+        _base_config(
+            temporal_decay=TemporalDecayConfig(enabled=True, half_life_days=14.0),
+            mmr=MMRConfig(enabled=True, lambda_param=0.5),
+        )
+    ) as mem:
         r_combined = await mem.search(query, min_score=0.0)
 
     assert len(r_combined) > 0, "Combined decay+MMR returned no results"

@@ -38,6 +38,7 @@ def _row(chunk_id: str, score: float, text: str = "") -> RawSearchRow:
 
 # ── tokenize_for_mmr ──────────────────────────────────────────────────────────
 
+
 class TestTokenizeForMmr:
     def test_basic_extraction(self):
         tokens = tokenize_for_mmr("Hello World")
@@ -82,6 +83,7 @@ class TestTokenizeForMmr:
 
 # ── jaccard_similarity ────────────────────────────────────────────────────────
 
+
 class TestJaccardSimilarity:
     def test_identical_sets(self):
         a = frozenset({"a", "b", "c"})
@@ -120,6 +122,7 @@ class TestJaccardSimilarity:
 
 # ── compute_mmr_score ─────────────────────────────────────────────────────────
 
+
 class TestComputeMmrScore:
     def test_pure_relevance(self):
         # lambda=1: MMR = 1*relevance - 0*similarity = relevance
@@ -143,6 +146,7 @@ class TestComputeMmrScore:
 
 
 # ── mmr_rerank ────────────────────────────────────────────────────────────────
+
 
 class TestMmrRerank:
     def test_empty_list(self):
@@ -213,6 +217,7 @@ class TestMmrRerank:
 
 
 # ── MMRReranker (PostProcessor wrapper) ──────────────────────────────────────
+
 
 class TestMMRReranker:
     async def test_apply_returns_reranked(self):
