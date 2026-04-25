@@ -27,7 +27,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from memweave import MemWeave, MemoryConfig
-from memweave.config import ChunkingConfig, EmbeddingConfig, QueryConfig
+from memweave.config import (
+    ChunkingConfig,
+    EmbeddingConfig,
+    MMRConfig,
+    QueryConfig,
+    TemporalDecayConfig,
+)
 from memweave.search.strategy import RawSearchRow
 from memweave.types import IndexResult, SearchResult, StoreStatus
 
@@ -251,6 +257,65 @@ class TestIndex:
         await mem.close()
 
 
+# ── startup dirty check ───────────────────────────────────────────────────────
+
+
+class TestStartupDirtyCheck:
+    async def test_fresh_instance_on_indexed_workspace_is_clean(self, tmp_path: Path):
+        _write_md(tmp_path, "memory/2026-01-01.md", "# Note\n\nContent.")
+        mem = await _open_mem(tmp_path)
+        await mem.index()
+        await mem.close()
+
+        # New instance pointing at the same workspace — should detect clean state
+        mem2 = await _open_mem(tmp_path)
+        assert mem2._dirty is False
+        await mem2.close()
+
+    async def test_fresh_instance_on_empty_workspace_is_clean(self, tmp_path: Path):
+        # No .md files, nothing to index — empty index matches empty disk
+        mem = await _open_mem(tmp_path)
+        assert mem._dirty is False
+        await mem.close()
+
+    async def test_dirty_after_new_file_added_on_disk(self, tmp_path: Path):
+        _write_md(tmp_path, "memory/2026-01-01.md", "# Note\n\nContent.")
+        mem = await _open_mem(tmp_path)
+        await mem.index()
+        await mem.close()
+
+        # Add a new file without indexing it
+        _write_md(tmp_path, "memory/2026-01-02.md", "# New\n\nNot indexed yet.")
+        mem2 = await _open_mem(tmp_path)
+        assert mem2._dirty is True
+        await mem2.close()
+
+    async def test_dirty_after_file_deleted_from_disk(self, tmp_path: Path):
+        f = _write_md(tmp_path, "memory/2026-01-01.md", "# Note\n\nContent.")
+        mem = await _open_mem(tmp_path)
+        await mem.index()
+        await mem.close()
+
+        # Delete the file without re-indexing
+        f.unlink()
+        mem2 = await _open_mem(tmp_path)
+        assert mem2._dirty is True
+        await mem2.close()
+
+    async def test_dirty_after_file_modified_on_disk(self, tmp_path: Path):
+        f = _write_md(tmp_path, "memory/2026-01-01.md", "# Note\n\nOriginal.")
+        mem = await _open_mem(tmp_path)
+        await mem.index()
+        await mem.close()
+
+        # Modify the file's mtime to be strictly newer than what was stored
+        current_mtime = f.stat().st_mtime
+        os.utime(f, (current_mtime + 10, current_mtime + 10))
+        mem2 = await _open_mem(tmp_path)
+        assert mem2._dirty is True
+        await mem2.close()
+
+
 # ── add() ─────────────────────────────────────────────────────────────────────
 
 
@@ -383,6 +448,8 @@ class TestStatus:
         await mem.close()
 
     async def test_status_dirty_before_index(self, tmp_path: Path):
+        # A workspace with an unindexed file must report dirty
+        _write_md(tmp_path, "memory/2026-01-01.md", "# Note\n\nNot yet indexed.")
         mem = await _open_mem(tmp_path)
         s = await mem.status()
         assert s.dirty is True
@@ -450,4 +517,137 @@ class TestProviderFingerprint:
         mem.config.embedding.model = "different-model"
         changed = await mem._provider_fingerprint_changed()
         assert changed is True
+        await mem.close()
+
+
+# ── _apply_postprocessors() ───────────────────────────────────────────────────
+
+
+class TestApplyPostprocessors:
+    """Per-call kwargs are forwarded to processors, not silently dropped."""
+
+    # ── MMR ───────────────────────────────────────────────────────────────────
+
+    async def test_mmr_lambda_kwarg_used_not_config_default(self, tmp_path: Path):
+        cfg = _make_config(
+            tmp_path, query=QueryConfig(mmr=MMRConfig(enabled=True, lambda_param=0.7))
+        )
+        mem = MemWeave(cfg, embedding_provider=MockEmbeddingProvider())
+        await mem.open()
+
+        with patch("memweave.store.MMRReranker") as MockMMR:
+            MockMMR.return_value.apply = AsyncMock(return_value=[])
+            await mem._apply_postprocessors([], "q", 0.0, mmr_lambda=0.3)
+
+        MockMMR.assert_called_once_with(lam=0.3)  # kwarg wins over config 0.7
+        await mem.close()
+
+    async def test_mmr_config_default_used_when_no_kwarg(self, tmp_path: Path):
+        cfg = _make_config(
+            tmp_path, query=QueryConfig(mmr=MMRConfig(enabled=True, lambda_param=0.7))
+        )
+        mem = MemWeave(cfg, embedding_provider=MockEmbeddingProvider())
+        await mem.open()
+
+        with patch("memweave.store.MMRReranker") as MockMMR:
+            MockMMR.return_value.apply = AsyncMock(return_value=[])
+            await mem._apply_postprocessors([], "q", 0.0)
+
+        MockMMR.assert_called_once_with(lam=0.7)  # config default used
+        await mem.close()
+
+    async def test_mmr_activated_by_kwarg_when_config_disabled(self, tmp_path: Path):
+        cfg = _make_config(
+            tmp_path, query=QueryConfig(mmr=MMRConfig(enabled=False, lambda_param=0.7))
+        )
+        mem = MemWeave(cfg, embedding_provider=MockEmbeddingProvider())
+        await mem.open()
+
+        with patch("memweave.store.MMRReranker") as MockMMR:
+            MockMMR.return_value.apply = AsyncMock(return_value=[])
+            await mem._apply_postprocessors([], "q", 0.0, mmr_lambda=0.5)
+
+        MockMMR.assert_called_once_with(lam=0.5)
+        await mem.close()
+
+    async def test_mmr_not_activated_when_disabled_and_no_kwarg(self, tmp_path: Path):
+        cfg = _make_config(tmp_path, query=QueryConfig(mmr=MMRConfig(enabled=False)))
+        mem = MemWeave(cfg, embedding_provider=MockEmbeddingProvider())
+        await mem.open()
+
+        with patch("memweave.store.MMRReranker") as MockMMR:
+            await mem._apply_postprocessors([], "q", 0.0)
+
+        MockMMR.assert_not_called()
+        await mem.close()
+
+    # ── Temporal decay ────────────────────────────────────────────────────────
+
+    async def test_decay_half_life_kwarg_used_not_config_default(self, tmp_path: Path):
+        cfg = _make_config(
+            tmp_path,
+            query=QueryConfig(
+                temporal_decay=TemporalDecayConfig(enabled=True, half_life_days=30.0)
+            ),
+        )
+        mem = MemWeave(cfg, embedding_provider=MockEmbeddingProvider())
+        await mem.open()
+
+        with patch("memweave.store.TemporalDecayProcessor") as MockTDP:
+            MockTDP.return_value.apply = AsyncMock(return_value=[])
+            await mem._apply_postprocessors([], "q", 0.0, decay_half_life_days=7.0)
+
+        MockTDP.assert_called_once_with(
+            half_life_days=7.0, workspace_dir=mem.config.workspace_dir
+        )  # kwarg wins over config 30.0
+        await mem.close()
+
+    async def test_decay_config_default_used_when_no_kwarg(self, tmp_path: Path):
+        cfg = _make_config(
+            tmp_path,
+            query=QueryConfig(
+                temporal_decay=TemporalDecayConfig(enabled=True, half_life_days=30.0)
+            ),
+        )
+        mem = MemWeave(cfg, embedding_provider=MockEmbeddingProvider())
+        await mem.open()
+
+        with patch("memweave.store.TemporalDecayProcessor") as MockTDP:
+            MockTDP.return_value.apply = AsyncMock(return_value=[])
+            await mem._apply_postprocessors([], "q", 0.0)
+
+        MockTDP.assert_called_once_with(
+            half_life_days=30.0, workspace_dir=mem.config.workspace_dir
+        )  # config default used
+        await mem.close()
+
+    async def test_decay_activated_by_kwarg_when_config_disabled(self, tmp_path: Path):
+        cfg = _make_config(
+            tmp_path,
+            query=QueryConfig(
+                temporal_decay=TemporalDecayConfig(enabled=False, half_life_days=30.0)
+            ),
+        )
+        mem = MemWeave(cfg, embedding_provider=MockEmbeddingProvider())
+        await mem.open()
+
+        with patch("memweave.store.TemporalDecayProcessor") as MockTDP:
+            MockTDP.return_value.apply = AsyncMock(return_value=[])
+            await mem._apply_postprocessors([], "q", 0.0, decay_half_life_days=14.0)
+
+        MockTDP.assert_called_once_with(half_life_days=14.0, workspace_dir=mem.config.workspace_dir)
+        await mem.close()
+
+    async def test_decay_not_activated_when_disabled_and_no_kwarg(self, tmp_path: Path):
+        cfg = _make_config(
+            tmp_path,
+            query=QueryConfig(temporal_decay=TemporalDecayConfig(enabled=False)),
+        )
+        mem = MemWeave(cfg, embedding_provider=MockEmbeddingProvider())
+        await mem.open()
+
+        with patch("memweave.store.TemporalDecayProcessor") as MockTDP:
+            await mem._apply_postprocessors([], "q", 0.0)
+
+        MockTDP.assert_not_called()
         await mem.close()

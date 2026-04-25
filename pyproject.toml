@@ -22,6 +22,9 @@ packages = [{ include = "memweave" }]
 [tool.poetry.urls]
 Repository = "https://github.com/sachinsharma9780/memweave"
 
+[tool.poetry.scripts]
+memweave = "memweave.cli:cli"
+
 [tool.poetry.dependencies]
 python = "^3.12"
 aiosqlite = ">=0.20.0"
@@ -30,6 +33,7 @@ litellm = ">=1.80.13,<2.0"
 numpy = ">=1.24.0"
 sqlite-vec = ">=0.1.0"
 watchfiles =  ">=0.20.0"
+click = ">=8.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = ">=8.0.0"
