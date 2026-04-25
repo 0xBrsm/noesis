@@ -124,7 +124,9 @@ async def test_session_subdir_dated_decay(workspace: Path, embedding_model: str)
         assert old_path in scores, f"{old_path} not found in results"
         assert new_path in scores, f"{new_path} not found in results"
         diff = abs(scores[old_path] - scores[new_path])
-        assert diff < 0.05, f"Identical content without decay should score similarly, diff={diff:.4f}"
+        assert (
+            diff < 0.05
+        ), f"Identical content without decay should score similarly, diff={diff:.4f}"
 
         # With aggressive decay: ~100-day-old session file should drop sharply
         # half_life=7d → 2^(-100/7) ≈ 0.000054 multiplier

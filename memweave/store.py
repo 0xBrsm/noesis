@@ -235,6 +235,41 @@ class MemWeave:
                 self._vector_available = False
 
         self._store = SQLiteStore(self._db)
+        await self._startup_dirty_check()
+
+    async def _startup_dirty_check(self) -> None:
+        """Set _dirty=False if the files table matches what's currently on disk.
+
+        Called once at the end of _ensure_db(). Compares the (path, mtime) rows
+        in the files table against the workspace .md files. Sets _dirty=False only
+        when the path sets are identical and no file on disk is newer than its
+        stored mtime. Leaves _dirty=True on any mismatch or unexpected error.
+
+        This lets fresh instances (e.g. every CLI invocation) reflect the true
+        index state rather than always starting as dirty.
+        """
+        assert self._db is not None
+        try:
+            workspace = Path(self.config.workspace_dir)
+
+            async with self._db.execute("SELECT path, mtime FROM files") as cursor:
+                db_rows: dict[str, float] = {row["path"]: row["mtime"] async for row in cursor}
+
+            disk_files = list_memory_files(workspace, self.config.extra_paths)
+            disk_rows: dict[str, float] = {
+                relative_path(f, workspace): f.stat().st_mtime for f in disk_files
+            }
+
+            if db_rows.keys() != disk_rows.keys():
+                return
+
+            for path, db_mtime in db_rows.items():
+                if disk_rows[path] > db_mtime + 1e-3:
+                    return
+
+            self._dirty = False
+        except Exception:
+            pass  # leave _dirty=True on any unexpected error
 
     async def open(self) -> None:
         """Open the database connection (alias for ``_ensure_db``).
@@ -530,7 +565,7 @@ class MemWeave:
             half_life = kwargs.get("decay_half_life_days", cfg.temporal_decay.half_life_days)
             emit(p, EMOJI_DECAY, "search", f"applying temporal decay  (half-life: {half_life}d)")
             decay = TemporalDecayProcessor(
-                half_life_days=cfg.temporal_decay.half_life_days,
+                half_life_days=half_life,
                 workspace_dir=self.config.workspace_dir,
             )
             rows = await decay.apply(rows, query, **kwargs)
@@ -539,7 +574,7 @@ class MemWeave:
         if cfg.mmr.enabled or "mmr_lambda" in kwargs:
             lam = kwargs.get("mmr_lambda", cfg.mmr.lambda_param)
             emit(p, EMOJI_MMR, "search", f"MMR reranking  (λ={lam})")
-            mmr = MMRReranker(lam=cfg.mmr.lambda_param)
+            mmr = MMRReranker(lam=lam)
             rows = await mmr.apply(rows, query, **kwargs)
 
         # 4. Custom processors
