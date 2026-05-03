@@ -1,0 +1,267 @@
+use anyhow::{Context, Result};
+use chrono::Local;
+use rusqlite::Connection;
+use std::path::{Path, PathBuf};
+use walkdir::WalkDir;
+
+use crate::db::{self, Chunk, SearchRow};
+use crate::llm::LLM;
+
+const FLUSH_SYSTEM_PROMPT: &str = "\
+You are extracting durable facts from a conversation to store in long-term memory.
+Write only facts worth keeping across future sessions: decisions made, preferences \
+expressed, important context, things the user wants to be remembered.
+Be concise. Use short bullet points. Omit small talk and transient details.
+If there is nothing worth storing, reply with exactly: @@SILENT@@";
+
+pub struct Memory {
+    conn: Connection,
+    workspace: PathBuf,
+    model: String,
+    chunk_tokens: usize,
+    chunk_overlap: usize,
+    vector_weight: f32,
+    text_weight: f32,
+    vec_available: bool,
+}
+
+impl Memory {
+    pub fn open(
+        workspace: &Path,
+        model: &str,
+        chunk_tokens: usize,
+        chunk_overlap: usize,
+    ) -> Result<Self> {
+        let db_path = workspace.join(".llmchat").join("memory.db");
+        let conn = db::open(&db_path)?;
+        let vec_available = db::register_vec_extension();
+
+        Ok(Self {
+            conn,
+            workspace: workspace.to_path_buf(),
+            model: model.to_string(),
+            chunk_tokens,
+            chunk_overlap,
+            vector_weight: 0.7,
+            text_weight: 0.3,
+            vec_available,
+        })
+    }
+
+    // ── Index ─────────────────────────────────────────────────────────────────
+
+    pub async fn index<L: LLM>(&mut self, llm: &L) -> Result<IndexResult> {
+        let memory_dir = self.workspace.join("memory");
+        if !memory_dir.exists() {
+            std::fs::create_dir_all(&memory_dir)?;
+            return Ok(IndexResult::default());
+        }
+
+        let files = collect_md_files(&memory_dir);
+        let stored_paths: std::collections::HashSet<String> =
+            db::list_file_paths(&self.conn)?.into_iter().collect();
+
+        let mut result = IndexResult::default();
+
+        for abs_path in &files {
+            let rel = rel_path(abs_path, &self.workspace)?;
+            let content = std::fs::read_to_string(abs_path)
+                .with_context(|| format!("reading {}", abs_path.display()))?;
+            let hash = db::sha256(&content);
+            let meta = abs_path.metadata()?;
+            let mtime = meta
+                .modified()?
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_secs_f64();
+
+            // Skip if hash unchanged
+            if let Some(stored_hash) = db::get_file_hash(&self.conn, &rel)? {
+                if stored_hash == hash {
+                    result.skipped += 1;
+                    continue;
+                }
+            }
+
+            self.index_file(&rel, &content, &hash, mtime, meta.len(), llm)
+                .await?;
+            result.indexed += 1;
+        }
+
+        // Prune stale files
+        let disk_paths: std::collections::HashSet<String> = files
+            .iter()
+            .map(|p| rel_path(p, &self.workspace))
+            .collect::<Result<_>>()?;
+        for stale in stored_paths.difference(&disk_paths) {
+            db::delete_chunks(&self.conn, stale)?;
+            self.conn
+                .execute("DELETE FROM files WHERE path = ?", [stale])?;
+            result.deleted += 1;
+        }
+
+        Ok(result)
+    }
+
+    async fn index_file<L: LLM>(
+        &mut self,
+        rel: &str,
+        content: &str,
+        hash: &str,
+        mtime: f64,
+        size: u64,
+        llm: &L,
+    ) -> Result<()> {
+        db::delete_chunks(&self.conn, rel)?;
+
+        let chunks = db::chunk_markdown(content, self.chunk_tokens, self.chunk_overlap);
+        let mut first_vec_dims: Option<usize> = None;
+
+        for chunk in &chunks {
+            let text_hash = db::sha256(&chunk.text);
+            let id = db::chunk_id(rel, chunk.start_line, chunk.end_line, &text_hash);
+
+            let embedding = if self.vec_available {
+                match llm.embed(&chunk.text).await {
+                    Ok(v) => {
+                        if first_vec_dims.is_none() {
+                            first_vec_dims = Some(v.len());
+                            db::ensure_vec_table(&self.conn, v.len())?;
+                        }
+                        Some(v)
+                    }
+                    Err(e) => {
+                        eprintln!("embed warning: {e}");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            db::upsert_chunk(
+                &self.conn,
+                &id,
+                rel,
+                chunk.start_line,
+                chunk.end_line,
+                &self.model,
+                &chunk.text,
+                embedding.as_deref(),
+            )?;
+
+            if let Some(ref v) = embedding {
+                db::upsert_vec(&self.conn, &id, v)?;
+            }
+        }
+
+        db::upsert_file(
+            &self.conn,
+            &db::FileEntry {
+                path: rel.to_string(),
+                hash: hash.to_string(),
+                mtime,
+                size,
+            },
+        )?;
+
+        Ok(())
+    }
+
+    // ── Search ────────────────────────────────────────────────────────────────
+
+    pub async fn search<L: LLM>(
+        &self,
+        query: &str,
+        limit: usize,
+        llm: &L,
+    ) -> Result<Vec<SearchRow>> {
+        if self.vec_available {
+            let query_vec = llm.embed(query).await?;
+            db::search_hybrid(
+                &self.conn,
+                query,
+                &query_vec,
+                limit,
+                self.vector_weight,
+                self.text_weight,
+            )
+        } else {
+            db::search_keyword(&self.conn, query, limit)
+        }
+    }
+
+    // ── Flush ─────────────────────────────────────────────────────────────────
+
+    pub async fn flush<L: LLM>(
+        &mut self,
+        conversation: &[crate::llm::Message],
+        llm: &L,
+    ) -> Result<Option<String>> {
+        use crate::llm::{Message, Role};
+
+        let mut messages = vec![Message {
+            role: Role::System,
+            content: FLUSH_SYSTEM_PROMPT.to_string(),
+        }];
+        messages.extend_from_slice(conversation);
+
+        let response = llm.chat(&messages).await?;
+        let extracted = response.trim().to_string();
+
+        if extracted.is_empty() || extracted.contains("@@SILENT@@") {
+            return Ok(None);
+        }
+
+        let memory_dir = self.workspace.join("memory");
+        std::fs::create_dir_all(&memory_dir)?;
+
+        let today = Local::now().format("%Y-%m-%d").to_string();
+        let dated_file = memory_dir.join(format!("{today}.md"));
+
+        if dated_file.exists() {
+            let existing = std::fs::read_to_string(&dated_file)?;
+            let sep = if existing.ends_with("\n\n") { "" } else { "\n\n" };
+            std::fs::write(&dated_file, format!("{existing}{sep}{extracted}\n"))?;
+        } else {
+            std::fs::write(&dated_file, format!("{extracted}\n"))?;
+        }
+
+        // Re-index the updated file
+        let content = std::fs::read_to_string(&dated_file)?;
+        let hash = db::sha256(&content);
+        let meta = dated_file.metadata()?;
+        let mtime = meta
+            .modified()?
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs_f64();
+        let rel = rel_path(&dated_file, &self.workspace)?;
+        self.index_file(&rel, &content, &hash, mtime, meta.len(), llm)
+            .await?;
+
+        Ok(Some(extracted))
+    }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+#[derive(Default, Debug)]
+pub struct IndexResult {
+    pub indexed: usize,
+    pub skipped: usize,
+    pub deleted: usize,
+}
+
+fn collect_md_files(dir: &Path) -> Vec<PathBuf> {
+    WalkDir::new(dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().map_or(false, |x| x == "md"))
+        .map(|e| e.path().to_path_buf())
+        .collect()
+}
+
+fn rel_path(abs: &Path, workspace: &Path) -> Result<String> {
+    abs.strip_prefix(workspace)
+        .with_context(|| format!("{} not under workspace", abs.display()))
+        .map(|p| p.to_string_lossy().into_owned())
+}

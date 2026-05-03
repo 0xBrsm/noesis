@@ -4,3 +4,36 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# LLM API (OpenAI-compatible)
+async-openai = "0.28"
+
+# SQLite
+rusqlite = { version = "0.32", features = ["bundled", "load_extension"] }
+
+# sqlite-vec extension
+sqlite-vec = "0.1"
+
+# Markdown / file handling
+walkdir = "2"
+sha2 = "0.10"
+hex = "0.4"
+
+# Config
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }
+
+# CLI / terminal
+clap = { version = "4", features = ["derive"] }
+rustyline = "14"
+
+# Streaming
+futures = "0.3"
+
+# Error handling
+anyhow = "1"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
