@@ -1,5 +1,5 @@
 use anyhow::Result;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use serde::Deserialize;
 use std::path::PathBuf;
 
@@ -33,7 +33,6 @@ impl Default for Config {
     }
 }
 
-// Partial config from TOML — all fields optional so missing keys use defaults
 #[derive(Debug, Deserialize, Default)]
 struct TomlConfig {
     base_url: Option<String>,
@@ -50,58 +49,83 @@ struct TomlConfig {
 #[derive(Parser, Debug)]
 #[command(name = "llmchat", about = "Local LLM chat with persistent memory")]
 pub struct Cli {
-    /// Path to config TOML file
-    #[arg(long)]
+    #[command(subcommand)]
+    pub command: Command,
+
+    /// Path to config TOML
+    #[arg(long, global = true)]
     pub config: Option<PathBuf>,
 
+    /// Workspace directory for memory files
+    #[arg(long, global = true)]
+    pub workspace: Option<PathBuf>,
+
     /// OpenAI-compatible API base URL
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub base_url: Option<String>,
 
-    /// API key (use "ollama" for Ollama)
-    #[arg(long)]
+    /// API key
+    #[arg(long, global = true)]
     pub api_key: Option<String>,
 
-    /// Chat model name
-    #[arg(long)]
-    pub model: Option<String>,
-
     /// Embedding model name
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub embed_model: Option<String>,
+}
 
-    /// Workspace directory for memory files
-    #[arg(long)]
-    pub workspace: Option<PathBuf>,
+#[derive(Subcommand, Debug)]
+pub enum Command {
+    /// Scan workspace and index memory files
+    Index {
+        /// Force re-index even if files are unchanged
+        #[arg(long)]
+        force: bool,
+    },
+    /// Search memory and print ranked results
+    Search {
+        /// Search query
+        query: String,
+
+        /// Number of results to return
+        #[arg(short, long, default_value = "5")]
+        limit: usize,
+
+        /// Use keyword (FTS5) search only, skip vector search
+        #[arg(long)]
+        keyword_only: bool,
+
+        /// Show full chunk text instead of a truncated snippet
+        #[arg(long)]
+        full: bool,
+    },
+    /// Interactive chat (coming soon)
+    Chat,
 }
 
 pub fn load(cli: &Cli) -> Result<Config> {
     let mut cfg = Config::default();
 
-    // Layer 1: TOML file
     let toml_path = cli.config.clone().or_else(default_config_path);
     if let Some(path) = toml_path {
         if path.exists() {
             let text = std::fs::read_to_string(&path)?;
             let toml: TomlConfig = toml::from_str(&text)?;
-            if let Some(v) = toml.base_url      { cfg.base_url    = v; }
-            if let Some(v) = toml.api_key        { cfg.api_key     = v; }
-            if let Some(v) = toml.chat_model     { cfg.chat_model  = v; }
-            if let Some(v) = toml.embed_model    { cfg.embed_model = v; }
-            if let Some(v) = toml.workspace      { cfg.workspace   = v; }
-            if let Some(v) = toml.chunk_tokens   { cfg.chunk_tokens  = v; }
-            if let Some(v) = toml.chunk_overlap  { cfg.chunk_overlap = v; }
-            if let Some(v) = toml.search_limit   { cfg.search_limit  = v; }
-            if let Some(v) = toml.flush_every    { cfg.flush_every   = v; }
+            if let Some(v) = toml.base_url     { cfg.base_url     = v; }
+            if let Some(v) = toml.api_key       { cfg.api_key      = v; }
+            if let Some(v) = toml.chat_model    { cfg.chat_model   = v; }
+            if let Some(v) = toml.embed_model   { cfg.embed_model  = v; }
+            if let Some(v) = toml.workspace     { cfg.workspace    = v; }
+            if let Some(v) = toml.chunk_tokens  { cfg.chunk_tokens = v; }
+            if let Some(v) = toml.chunk_overlap { cfg.chunk_overlap = v; }
+            if let Some(v) = toml.search_limit  { cfg.search_limit = v; }
+            if let Some(v) = toml.flush_every   { cfg.flush_every  = v; }
         }
     }
 
-    // Layer 2: CLI overrides
-    if let Some(v) = &cli.base_url     { cfg.base_url    = v.clone(); }
-    if let Some(v) = &cli.api_key      { cfg.api_key     = v.clone(); }
-    if let Some(v) = &cli.model        { cfg.chat_model  = v.clone(); }
-    if let Some(v) = &cli.embed_model  { cfg.embed_model = v.clone(); }
-    if let Some(v) = &cli.workspace    { cfg.workspace   = v.clone(); }
+    if let Some(v) = &cli.base_url    { cfg.base_url    = v.clone(); }
+    if let Some(v) = &cli.api_key     { cfg.api_key     = v.clone(); }
+    if let Some(v) = &cli.embed_model { cfg.embed_model = v.clone(); }
+    if let Some(v) = &cli.workspace   { cfg.workspace   = v.clone(); }
 
     Ok(cfg)
 }

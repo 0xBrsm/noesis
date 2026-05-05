@@ -169,6 +169,10 @@ impl Memory {
 
     // ── Search ────────────────────────────────────────────────────────────────
 
+    pub fn search_keyword(&self, query: &str, limit: usize) -> Result<Vec<SearchRow>> {
+        db::search_keyword(&self.conn, query, limit)
+    }
+
     pub async fn search<L: LLM>(
         &self,
         query: &str,
