@@ -14,6 +14,10 @@ pub struct Config {
     pub chunk_overlap: usize,
     pub search_limit: usize,
     pub flush_every: usize,
+    pub context_candidates: usize,
+    pub context_limit: usize,
+    pub context_threshold: f32,
+    pub history_chars: usize,
 }
 
 impl Default for Config {
@@ -29,6 +33,10 @@ impl Default for Config {
             chunk_overlap: 80,
             search_limit: 5,
             flush_every: 10,
+            context_candidates: 10,
+            context_limit: 3,
+            context_threshold: 0.5,
+            history_chars: 16_000,
         }
     }
 }

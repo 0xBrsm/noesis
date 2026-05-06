@@ -7,6 +7,7 @@ use anyhow::Result;
 use clap::Parser;
 
 use crate::config::Command;
+use crate::db::SearchRow;
 use crate::llm::{Embedder, LLM, LocalLLM, RemoteLLM, Reranker};
 use crate::memory::Memory;
 
@@ -39,10 +40,7 @@ async fn main() -> Result<()> {
         Command::Search { query, limit, keyword_only, full } => {
             cmd_search(&cfg, &embedder, query, *limit, *keyword_only, reranker.as_ref(), *full).await
         }
-        Command::Chat => {
-            eprintln!("chat not yet implemented — use index and search for now");
-            Ok(())
-        }
+        Command::Chat => cmd_chat(&cfg, &embedder, reranker.as_ref()).await,
     }
 }
 
@@ -134,4 +132,85 @@ async fn cmd_search<L: LLM>(
     }
 
     Ok(())
+}
+
+async fn cmd_chat<L: LLM>(
+    cfg: &config::Config,
+    llm: &L,
+    reranker: Option<&Reranker>,
+) -> Result<()> {
+    use crate::llm::{Message, Role};
+    use rustyline::error::ReadlineError;
+
+    let mem = Memory::open(
+        &cfg.workspace,
+        &cfg.embed_model,
+        cfg.chunk_tokens,
+        cfg.chunk_overlap,
+    )?;
+
+    let mut history: Vec<Message> = vec![];
+    let mut rl = rustyline::DefaultEditor::new()?;
+
+    println!("Chat ready. Ctrl-D to exit.");
+
+    loop {
+        let line = match rl.readline("> ") {
+            Ok(l) => l,
+            Err(ReadlineError::Eof | ReadlineError::Interrupted) => break,
+            Err(e) => return Err(e.into()),
+        };
+        let input = line.trim().to_string();
+        if input.is_empty() { continue; }
+        let _ = rl.add_history_entry(&input);
+
+        let chunks = mem.search_for_context(
+            &input,
+            llm,
+            reranker,
+            cfg.context_candidates,
+            cfg.context_limit,
+            cfg.context_threshold,
+        ).await?;
+
+        let system = build_system_prompt(&chunks);
+        let mut messages = vec![Message { role: Role::System, content: system }];
+        messages.extend_from_slice(&history);
+        messages.push(Message { role: Role::User, content: input.clone() });
+
+        let response = llm.chat_stream(&messages).await?;
+
+        history.push(Message { role: Role::User, content: input });
+        history.push(Message { role: Role::Assistant, content: response });
+
+        trim_history(&mut history, cfg.history_chars);
+    }
+
+    Ok(())
+}
+
+fn build_system_prompt(chunks: &[SearchRow]) -> String {
+    let mut s = String::from(
+        "You are a helpful assistant with access to the user's memory store.\n"
+    );
+    if chunks.is_empty() {
+        return s;
+    }
+    s.push_str("\nRelevant memory:\n");
+    for chunk in chunks {
+        s.push_str(&format!(
+            "\n---\nSource: {} (lines {}-{})\n{}\n",
+            chunk.path, chunk.start_line, chunk.end_line, chunk.text.trim()
+        ));
+    }
+    s.push_str("---\n");
+    s
+}
+
+fn trim_history(history: &mut Vec<crate::llm::Message>, char_budget: usize) {
+    while history.iter().map(|m| m.content.len()).sum::<usize>() > char_budget
+        && history.len() >= 2
+    {
+        history.drain(0..2);
+    }
 }

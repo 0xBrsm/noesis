@@ -199,10 +199,28 @@ impl Memory {
             let docs: Vec<String> = results.iter().map(|r| r.text.clone()).collect();
             let mut scored = rr.rerank(query, &docs)?;
             scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-            results = scored.into_iter().map(|(i, _)| results[i].clone()).collect();
+            let old = results;
+            results = scored.into_iter().map(|(i, score)| {
+                let mut row = old[i].clone();
+                row.score = score;
+                row
+            }).collect();
         }
 
         Ok(results)
+    }
+
+    pub async fn search_for_context<L: LLM>(
+        &self,
+        query: &str,
+        llm: &L,
+        reranker: Option<&Reranker>,
+        candidates: usize,
+        max_results: usize,
+        threshold: f32,
+    ) -> Result<Vec<db::SearchRow>> {
+        let results = self.search(query, candidates, llm, reranker).await?;
+        Ok(results.into_iter().filter(|r| r.score >= threshold).take(max_results).collect())
     }
 
     // ── Flush ─────────────────────────────────────────────────────────────────

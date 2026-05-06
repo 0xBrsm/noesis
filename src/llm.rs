@@ -62,6 +62,7 @@ impl From<&Message> for ChatCompletionRequestMessage {
 
 pub trait LLM: Send + Sync {
     fn chat(&self, messages: &[Message]) -> impl Future<Output = Result<String>> + Send;
+    fn chat_stream(&self, messages: &[Message]) -> impl Future<Output = Result<String>> + Send;
     fn embed(&self, text: &str) -> impl Future<Output = Result<Vec<f32>>> + Send;
 }
 
@@ -85,9 +86,10 @@ impl RemoteLLM {
         }
     }
 
-    /// Stream a chat response, printing tokens to stdout as they arrive.
-    /// Returns the full assembled response string.
-    pub async fn chat_stream(&self, messages: &[Message]) -> Result<String> {
+}
+
+impl LLM for RemoteLLM {
+    async fn chat_stream(&self, messages: &[Message]) -> Result<String> {
         let msgs: Vec<ChatCompletionRequestMessage> =
             messages.iter().map(|m| m.into()).collect();
 
@@ -112,9 +114,7 @@ impl RemoteLLM {
         println!();
         Ok(full)
     }
-}
 
-impl LLM for RemoteLLM {
     async fn chat(&self, messages: &[Message]) -> Result<String> {
         let msgs: Vec<ChatCompletionRequestMessage> =
             messages.iter().map(|m| m.into()).collect();
@@ -172,6 +172,10 @@ impl LLM for LocalLLM {
         anyhow::bail!("LocalLLM chat not yet implemented")
     }
 
+    async fn chat_stream(&self, _messages: &[Message]) -> Result<String> {
+        anyhow::bail!("LocalLLM chat not yet implemented")
+    }
+
     async fn embed(&self, text: &str) -> Result<Vec<f32>> {
         let text = text.to_string();
         let embedder = self.embedder.clone();
@@ -198,6 +202,13 @@ impl LLM for Embedder {
         match self {
             Self::Remote(r) => r.chat(messages).await,
             Self::Local(l) => l.chat(messages).await,
+        }
+    }
+
+    async fn chat_stream(&self, messages: &[Message]) -> Result<String> {
+        match self {
+            Self::Remote(r) => r.chat_stream(messages).await,
+            Self::Local(l) => l.chat_stream(messages).await,
         }
     }
 
