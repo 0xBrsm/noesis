@@ -33,8 +33,8 @@ impl Memory {
         chunk_overlap: usize,
     ) -> Result<Self> {
         let db_path = workspace.join(".llmchat").join("memory.db");
-        let conn = db::open(&db_path)?;
         let vec_available = db::register_vec_extension();
+        let conn = db::open(&db_path)?;
 
         Ok(Self {
             conn,
@@ -111,6 +111,17 @@ impl Memory {
         size: u64,
         llm: &L,
     ) -> Result<()> {
+        // File record must exist before chunks (foreign key constraint)
+        db::upsert_file(
+            &self.conn,
+            &db::FileEntry {
+                path: rel.to_string(),
+                hash: hash.to_string(),
+                mtime,
+                size,
+            },
+        )?;
+
         db::delete_chunks(&self.conn, rel)?;
 
         let chunks = db::chunk_markdown(content, self.chunk_tokens, self.chunk_overlap);
@@ -153,16 +164,6 @@ impl Memory {
                 db::upsert_vec(&self.conn, &id, v)?;
             }
         }
-
-        db::upsert_file(
-            &self.conn,
-            &db::FileEntry {
-                path: rel.to_string(),
-                hash: hash.to_string(),
-                mtime,
-                size,
-            },
-        )?;
 
         Ok(())
     }

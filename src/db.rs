@@ -294,22 +294,38 @@ pub fn search_vector(
          ORDER BY cv.distance ASC",
     )?;
 
-    let rows = stmt
+    let mut rows: Vec<SearchRow> = stmt
         .query_map(params![blob, limit as i64], |r| {
             let dist: f64 = r.get(5)?;
-            let score = (1.0 / (1.0 + dist)) as f32;
+            // Convert L2 distance to cosine similarity for normalized vectors:
+            // cos_sim = 1 - (dist² / 2), clamped to [0, 1]
+            let cos_sim = (1.0 - (dist * dist / 2.0)).clamp(0.0, 1.0) as f32;
             Ok(SearchRow {
                 id: r.get(0)?,
                 path: r.get(1)?,
                 start_line: r.get::<_, i64>(2)? as usize,
                 end_line: r.get::<_, i64>(3)? as usize,
                 text: r.get(4)?,
-                score,
-                vector_score: Some(score),
+                score: cos_sim,
+                vector_score: Some(cos_sim),
                 text_score: None,
             })
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    // Min-max normalize so top result = 1.0 and scores spread meaningfully
+    if rows.len() > 1 {
+        let max = rows[0].score;
+        let min = rows.last().map(|r| r.score).unwrap_or(0.0);
+        let range = max - min;
+        if range > 1e-6 {
+            for row in &mut rows {
+                let norm = (row.score - min) / range;
+                row.score = norm;
+                row.vector_score = Some(norm);
+            }
+        }
+    }
 
     Ok(rows)
 }
@@ -347,7 +363,8 @@ pub fn search_hybrid(
     let mut merged: Vec<SearchRow> = scores
         .into_values()
         .map(|(combined, vs, ts, mut row)| {
-            row.score = combined;
+            let penalty = path_penalty(&row.path);
+            row.score = combined * penalty;
             row.vector_score = vs;
             row.text_score = ts;
             row
@@ -361,16 +378,47 @@ pub fn search_hybrid(
 
 // ── FTS helpers ───────────────────────────────────────────────────────────────
 
+static STOP_WORDS: std::sync::LazyLock<std::collections::HashSet<&'static str>> =
+    std::sync::LazyLock::new(|| {
+        [
+            "a", "an", "the", "this", "that", "these", "those",
+            "i", "me", "my", "we", "our", "you", "your", "he", "she", "it", "they", "them",
+            "is", "are", "was", "were", "be", "been", "being",
+            "have", "has", "had", "do", "does", "did",
+            "will", "would", "could", "should", "can", "may", "might",
+            "in", "on", "at", "to", "for", "of", "with", "by", "from",
+            "about", "into", "through", "before", "after", "between", "under", "over",
+            "and", "or", "but", "if", "then", "because", "as", "while",
+            "when", "where", "what", "which", "who", "how", "why",
+            "up", "out", "no", "not", "so", "just", "also", "than", "too",
+            "get", "go", "use", "make", "set", "show", "find", "tell", "help",
+        ]
+        .into_iter()
+        .collect()
+    });
+
 fn build_fts_query(raw: &str) -> Option<String> {
     let tokens: Vec<String> = raw
         .split(|c: char| !c.is_alphanumeric() && c != '_')
         .filter(|t| !t.is_empty())
+        .filter(|t| t.len() >= 2)
+        .filter(|t| !STOP_WORDS.contains(t.to_lowercase().as_str()))
         .map(|t| format!("\"{}\"", t.replace('"', "")))
         .collect();
     if tokens.is_empty() {
         None
     } else {
         Some(tokens.join(" AND "))
+    }
+}
+
+/// Penalty multiplier for paths that tend to be noisy in search (changelogs, etc.)
+fn path_penalty(path: &str) -> f32 {
+    let lower = path.to_lowercase();
+    if lower.contains("changelog") || lower.contains("changes") || lower.contains("history") {
+        0.75
+    } else {
+        1.0
     }
 }
 
