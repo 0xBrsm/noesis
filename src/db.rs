@@ -363,8 +363,7 @@ pub fn search_hybrid(
     let mut merged: Vec<SearchRow> = scores
         .into_values()
         .map(|(combined, vs, ts, mut row)| {
-            let penalty = path_penalty(&row.path);
-            row.score = combined * penalty;
+            row.score = combined;
             row.vector_score = vs;
             row.text_score = ts;
             row
@@ -412,15 +411,6 @@ fn build_fts_query(raw: &str) -> Option<String> {
     }
 }
 
-/// Penalty multiplier for paths that tend to be noisy in search (changelogs, etc.)
-pub fn path_penalty(path: &str) -> f32 {
-    let lower = path.to_lowercase();
-    if lower.contains("changelog") || lower.contains("changes") || lower.contains("history") {
-        0.5
-    } else {
-        1.0
-    }
-}
 
 fn bm25_to_score(rank: f64) -> f64 {
     if !rank.is_finite() {

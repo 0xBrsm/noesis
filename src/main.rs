@@ -27,10 +27,17 @@ async fn main() -> Result<()> {
         ))
     };
 
+    let reranker: Option<Reranker> = if cli.local_embed {
+        println!("loading reranker (ms-marco-MiniLM-L-6-v2)...");
+        Some(Reranker::new()?)
+    } else {
+        None
+    };
+
     match &cli.command {
         Command::Index { force } => cmd_index(&cfg, &embedder, *force).await,
-        Command::Search { query, limit, keyword_only, rerank, full } => {
-            cmd_search(&cfg, &embedder, query, *limit, *keyword_only, *rerank, *full).await
+        Command::Search { query, limit, keyword_only, full } => {
+            cmd_search(&cfg, &embedder, query, *limit, *keyword_only, reranker.as_ref(), *full).await
         }
         Command::Chat => {
             eprintln!("chat not yet implemented — use index and search for now");
@@ -74,7 +81,7 @@ async fn cmd_search<L: LLM>(
     query: &str,
     limit: usize,
     keyword_only: bool,
-    rerank: bool,
+    reranker: Option<&Reranker>,
     full: bool,
 ) -> Result<()> {
     let mem = Memory::open(
@@ -84,17 +91,10 @@ async fn cmd_search<L: LLM>(
         cfg.chunk_overlap,
     )?;
 
-    let reranker = if rerank {
-        println!("loading reranker (jina-reranker-v1-turbo-en)...");
-        Some(Reranker::new()?)
-    } else {
-        None
-    };
-
     let results = if keyword_only {
         mem.search_keyword(query, limit)?
     } else {
-        mem.search(query, limit, llm, reranker.as_ref()).await?
+        mem.search(query, limit, llm, reranker).await?
     };
 
     if results.is_empty() {

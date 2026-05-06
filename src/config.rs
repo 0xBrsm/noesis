@@ -98,10 +98,6 @@ pub enum Command {
         #[arg(long)]
         keyword_only: bool,
 
-        /// Rerank results with jina-reranker-v1-turbo-en
-        #[arg(long)]
-        rerank: bool,
-
         /// Show full chunk text instead of a truncated snippet
         #[arg(long)]
         full: bool,

@@ -181,32 +181,25 @@ impl Memory {
         llm: &L,
         reranker: Option<&Reranker>,
     ) -> Result<Vec<SearchRow>> {
-        let candidate_limit = if reranker.is_some() { (limit * 3).max(20) } else { limit };
-
         let mut results = if self.vec_available {
             let query_vec = llm.embed(query).await?;
             db::search_hybrid(
                 &self.conn,
                 query,
                 &query_vec,
-                candidate_limit,
+                limit,
                 self.vector_weight,
                 self.text_weight,
             )?
         } else {
-            db::search_keyword(&self.conn, query, candidate_limit)?
+            db::search_keyword(&self.conn, query, limit)?
         };
 
         if let Some(rr) = reranker {
             let docs: Vec<String> = results.iter().map(|r| r.text.clone()).collect();
             let mut scored = rr.rerank(query, &docs)?;
-            // Apply path penalty so changelog/history files don't overrank
-            for (idx, score) in &mut scored {
-                *score *= db::path_penalty(&results[*idx].path);
-            }
             scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
             results = scored.into_iter().map(|(i, _)| results[i].clone()).collect();
-            results.truncate(limit);
         }
 
         Ok(results)
