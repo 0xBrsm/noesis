@@ -249,8 +249,12 @@ impl Reranker {
             let mut model = inner.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
             model.rerank(query, docs, false, None).map_err(anyhow::Error::from)
         })?;
-        Ok(results.into_iter().map(|r| (r.index, r.score)).collect())
+        Ok(results.into_iter().map(|r| (r.index, sigmoid(r.score))).collect())
     }
+}
+
+fn sigmoid(x: f32) -> f32 {
+    1.0 / (1.0 + (-x).exp())
 }
 
 fn download_reranker(cache_dir: &std::path::Path) -> Result<std::path::PathBuf> {
