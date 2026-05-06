@@ -7,7 +7,7 @@ use anyhow::Result;
 use clap::Parser;
 
 use crate::config::Command;
-use crate::llm::{Embedder, LLM, LocalLLM, RemoteLLM};
+use crate::llm::{Embedder, LLM, LocalLLM, RemoteLLM, Reranker};
 use crate::memory::Memory;
 
 #[tokio::main]
@@ -16,7 +16,7 @@ async fn main() -> Result<()> {
     let cfg = config::load(&cli)?;
 
     let embedder: Embedder = if cli.local_embed {
-        println!("loading local embedder (nomic-embed-text-v1.5)...");
+        println!("loading local embedder (all-MiniLM-L6-v2-Q)...");
         Embedder::Local(LocalLLM::new()?)
     } else {
         Embedder::Remote(RemoteLLM::new(
@@ -29,8 +29,8 @@ async fn main() -> Result<()> {
 
     match &cli.command {
         Command::Index { force } => cmd_index(&cfg, &embedder, *force).await,
-        Command::Search { query, limit, keyword_only, full } => {
-            cmd_search(&cfg, &embedder, query, *limit, *keyword_only, *full).await
+        Command::Search { query, limit, keyword_only, rerank, full } => {
+            cmd_search(&cfg, &embedder, query, *limit, *keyword_only, *rerank, *full).await
         }
         Command::Chat => {
             eprintln!("chat not yet implemented — use index and search for now");
@@ -48,7 +48,7 @@ async fn cmd_index<L: LLM>(cfg: &config::Config, llm: &L, force: bool) -> Result
     )?;
 
     if force {
-        let db_path = cfg.workspace.join(".llmchat").join("memory.db");
+        let db_path = cfg.workspace.join("memory.db");
         if db_path.exists() {
             std::fs::remove_file(&db_path)?;
             mem = Memory::open(
@@ -74,6 +74,7 @@ async fn cmd_search<L: LLM>(
     query: &str,
     limit: usize,
     keyword_only: bool,
+    rerank: bool,
     full: bool,
 ) -> Result<()> {
     let mem = Memory::open(
@@ -83,10 +84,17 @@ async fn cmd_search<L: LLM>(
         cfg.chunk_overlap,
     )?;
 
+    let reranker = if rerank {
+        println!("loading reranker (jina-reranker-v1-turbo-en)...");
+        Some(Reranker::new()?)
+    } else {
+        None
+    };
+
     let results = if keyword_only {
         mem.search_keyword(query, limit)?
     } else {
-        mem.search(query, limit, llm).await?
+        mem.search(query, limit, llm, reranker.as_ref()).await?
     };
 
     if results.is_empty() {

@@ -7,7 +7,10 @@ use async_openai::{
         CreateEmbeddingRequestArgs,
     },
 };
-use fastembed::{EmbeddingModel, InitOptionsWithLength, TextEmbedding};
+use fastembed::{
+    EmbeddingModel, InitOptionsWithLength, OnnxSource, RerankInitOptionsUserDefined,
+    TextEmbedding, TextRerank, TokenizerFiles, UserDefinedRerankingModel,
+};
 use futures::StreamExt;
 use std::future::Future;
 use std::io::Write;
@@ -156,7 +159,7 @@ impl LocalLLM {
         std::fs::create_dir_all(&cache_dir)?;
 
         let model = TextEmbedding::try_new(
-            InitOptionsWithLength::new(EmbeddingModel::NomicEmbedTextV15)
+            InitOptionsWithLength::new(EmbeddingModel::AllMiniLML6V2Q)
                 .with_cache_dir(cache_dir)
                 .with_show_download_progress(true),
         )?;
@@ -204,4 +207,77 @@ impl LLM for Embedder {
             Self::Local(l) => l.embed(text).await,
         }
     }
+}
+
+// ── Reranker ──────────────────────────────────────────────────────────────────
+
+const RERANKER_REPO: &str = "Xenova/ms-marco-MiniLM-L-6-v2";
+const RERANKER_ONNX: &str = "onnx/model_int8.onnx";
+
+pub struct Reranker {
+    inner: Arc<std::sync::Mutex<TextRerank>>,
+}
+
+impl Reranker {
+    pub fn new() -> Result<Self> {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        let cache_dir = std::path::PathBuf::from(&home).join(".cache").join("fastembed");
+        std::fs::create_dir_all(&cache_dir)?;
+
+        let model_dir = download_reranker(&cache_dir)?;
+        let model = load_reranker(&model_dir)?;
+        Ok(Self { inner: Arc::new(std::sync::Mutex::new(model)) })
+    }
+
+    /// Rerank `docs` against `query`; returns `(original_index, reranker_score)` sorted best-first.
+    pub fn rerank(&self, query: &str, docs: &[String]) -> Result<Vec<(usize, f32)>> {
+        let query = query.to_string();
+        let docs = docs.to_vec();
+        let inner = self.inner.clone();
+        let results = tokio::task::block_in_place(|| {
+            let mut model = inner.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
+            model.rerank(query, docs, false, None).map_err(anyhow::Error::from)
+        })?;
+        Ok(results.into_iter().map(|r| (r.index, r.score)).collect())
+    }
+}
+
+fn download_reranker(cache_dir: &std::path::Path) -> Result<std::path::PathBuf> {
+    use hf_hub::{Cache, api::sync::ApiBuilder};
+
+    let cache = Cache::new(cache_dir.to_path_buf());
+    let api = ApiBuilder::from_cache(cache).with_progress(true).build()
+        .map_err(|e| anyhow::anyhow!("hf-hub init: {e}"))?;
+    let repo = api.model(RERANKER_REPO.to_string());
+
+    // Download required files (hf-hub caches them automatically)
+    for file in &[RERANKER_ONNX, "tokenizer.json", "config.json",
+                  "special_tokens_map.json", "tokenizer_config.json"] {
+        repo.get(file).map_err(|e| anyhow::anyhow!("download {file}: {e}"))?;
+    }
+
+    // Return the snapshot dir so we can read files by name
+    let onnx_path = repo.get(RERANKER_ONNX)
+        .map_err(|e| anyhow::anyhow!("locate onnx: {e}"))?;
+    // snapshot dir is two levels up from onnx/model_int8.onnx
+    Ok(onnx_path.parent().unwrap().parent().unwrap().to_path_buf())
+}
+
+fn load_reranker(model_dir: &std::path::Path) -> Result<TextRerank> {
+    let tokenizer_files = TokenizerFiles {
+        tokenizer_file: std::fs::read(model_dir.join("tokenizer.json"))?,
+        config_file: std::fs::read(model_dir.join("config.json"))?,
+        special_tokens_map_file: std::fs::read(model_dir.join("special_tokens_map.json"))?,
+        tokenizer_config_file: std::fs::read(model_dir.join("tokenizer_config.json"))?,
+    };
+
+    let onnx_bytes = std::fs::read(model_dir.join("onnx").join("model_int8.onnx"))?;
+
+    let user_model = UserDefinedRerankingModel::new(
+        OnnxSource::Memory(onnx_bytes),
+        tokenizer_files,
+    );
+
+    TextRerank::try_new_from_user_defined(user_model, RerankInitOptionsUserDefined::default())
+        .map_err(anyhow::Error::from)
 }

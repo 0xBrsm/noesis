@@ -413,10 +413,10 @@ fn build_fts_query(raw: &str) -> Option<String> {
 }
 
 /// Penalty multiplier for paths that tend to be noisy in search (changelogs, etc.)
-fn path_penalty(path: &str) -> f32 {
+pub fn path_penalty(path: &str) -> f32 {
     let lower = path.to_lowercase();
     if lower.contains("changelog") || lower.contains("changes") || lower.contains("history") {
-        0.75
+        0.5
     } else {
         1.0
     }
