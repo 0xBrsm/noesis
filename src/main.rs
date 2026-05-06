@@ -7,7 +7,7 @@ use anyhow::Result;
 use clap::Parser;
 
 use crate::config::Command;
-use crate::llm::RemoteLLM;
+use crate::llm::{Embedder, LLM, LocalLLM, RemoteLLM};
 use crate::memory::Memory;
 
 #[tokio::main]
@@ -15,26 +15,31 @@ async fn main() -> Result<()> {
     let cli = config::Cli::parse();
     let cfg = config::load(&cli)?;
 
-    let llm = RemoteLLM::new(
-        &cfg.base_url,
-        &cfg.api_key,
-        &cfg.chat_model,
-        &cfg.embed_model,
-    );
+    let embedder: Embedder = if cli.local_embed {
+        println!("loading local embedder (nomic-embed-text-v1.5)...");
+        Embedder::Local(LocalLLM::new()?)
+    } else {
+        Embedder::Remote(RemoteLLM::new(
+            &cfg.base_url,
+            &cfg.api_key,
+            &cfg.chat_model,
+            &cfg.embed_model,
+        ))
+    };
 
     match &cli.command {
-        Command::Index { force } => cmd_index(&cfg, &llm, *force).await,
+        Command::Index { force } => cmd_index(&cfg, &embedder, *force).await,
         Command::Search { query, limit, keyword_only, full } => {
-            cmd_search(&cfg, &llm, query, *limit, *keyword_only, *full).await
+            cmd_search(&cfg, &embedder, query, *limit, *keyword_only, *full).await
         }
         Command::Chat => {
-            eprintln!("chat not yet implemented — index and search are ready");
+            eprintln!("chat not yet implemented — use index and search for now");
             Ok(())
         }
     }
 }
 
-async fn cmd_index(cfg: &config::Config, llm: &RemoteLLM, force: bool) -> Result<()> {
+async fn cmd_index<L: LLM>(cfg: &config::Config, llm: &L, force: bool) -> Result<()> {
     let mut mem = Memory::open(
         &cfg.workspace,
         &cfg.embed_model,
@@ -43,7 +48,6 @@ async fn cmd_index(cfg: &config::Config, llm: &RemoteLLM, force: bool) -> Result
     )?;
 
     if force {
-        // Wipe the DB so everything is re-indexed
         let db_path = cfg.workspace.join(".llmchat").join("memory.db");
         if db_path.exists() {
             std::fs::remove_file(&db_path)?;
@@ -64,9 +68,9 @@ async fn cmd_index(cfg: &config::Config, llm: &RemoteLLM, force: bool) -> Result
     Ok(())
 }
 
-async fn cmd_search(
+async fn cmd_search<L: LLM>(
     cfg: &config::Config,
-    llm: &RemoteLLM,
+    llm: &L,
     query: &str,
     limit: usize,
     keyword_only: bool,

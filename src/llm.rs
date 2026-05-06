@@ -7,8 +7,13 @@ use async_openai::{
         CreateEmbeddingRequestArgs,
     },
 };
+use fastembed::{EmbeddingModel, InitOptionsWithLength, TextEmbedding};
 use futures::StreamExt;
+use std::future::Future;
 use std::io::Write;
+use std::sync::Arc;
+
+// ── Message types ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct Message {
@@ -50,19 +55,14 @@ impl From<&Message> for ChatCompletionRequestMessage {
     }
 }
 
-pub trait LLM: Send + Sync {
-    fn chat(
-        &self,
-        messages: &[Message],
-    ) -> impl Future<Output = Result<String>> + Send;
+// ── LLM trait ─────────────────────────────────────────────────────────────────
 
-    fn embed(
-        &self,
-        text: &str,
-    ) -> impl Future<Output = Result<Vec<f32>>> + Send;
+pub trait LLM: Send + Sync {
+    fn chat(&self, messages: &[Message]) -> impl Future<Output = Result<String>> + Send;
+    fn embed(&self, text: &str) -> impl Future<Output = Result<Vec<f32>>> + Send;
 }
 
-use std::future::Future;
+// ── RemoteLLM ─────────────────────────────────────────────────────────────────
 
 pub struct RemoteLLM {
     client: Client<OpenAIConfig>,
@@ -81,49 +81,8 @@ impl RemoteLLM {
             embed_model: embed_model.to_string(),
         }
     }
-}
 
-impl LLM for RemoteLLM {
-    async fn chat(&self, messages: &[Message]) -> Result<String> {
-        let msgs: Vec<ChatCompletionRequestMessage> =
-            messages.iter().map(|m| m.into()).collect();
-
-        let request = CreateChatCompletionRequestArgs::default()
-            .model(&self.chat_model)
-            .messages(msgs)
-            .build()?;
-
-        let response = self.client.chat().create(request).await?;
-        let content = response
-            .choices
-            .into_iter()
-            .next()
-            .and_then(|c| c.message.content)
-            .unwrap_or_default();
-
-        Ok(content)
-    }
-
-    async fn embed(&self, text: &str) -> Result<Vec<f32>> {
-        let request = CreateEmbeddingRequestArgs::default()
-            .model(&self.embed_model)
-            .input(text)
-            .build()?;
-
-        let response = self.client.embeddings().create(request).await?;
-        let vec = response
-            .data
-            .into_iter()
-            .next()
-            .map(|e| e.embedding)
-            .unwrap_or_default();
-
-        Ok(vec)
-    }
-}
-
-impl RemoteLLM {
-    /// Stream a chat response, printing tokens as they arrive.
+    /// Stream a chat response, printing tokens to stdout as they arrive.
     /// Returns the full assembled response string.
     pub async fn chat_stream(&self, messages: &[Message]) -> Result<String> {
         let msgs: Vec<ChatCompletionRequestMessage> =
@@ -152,14 +111,97 @@ impl RemoteLLM {
     }
 }
 
-pub struct LocalLLM;
+impl LLM for RemoteLLM {
+    async fn chat(&self, messages: &[Message]) -> Result<String> {
+        let msgs: Vec<ChatCompletionRequestMessage> =
+            messages.iter().map(|m| m.into()).collect();
+        let request = CreateChatCompletionRequestArgs::default()
+            .model(&self.chat_model)
+            .messages(msgs)
+            .build()?;
+        let response = self.client.chat().create(request).await?;
+        Ok(response
+            .choices
+            .into_iter()
+            .next()
+            .and_then(|c| c.message.content)
+            .unwrap_or_default())
+    }
+
+    async fn embed(&self, text: &str) -> Result<Vec<f32>> {
+        let request = CreateEmbeddingRequestArgs::default()
+            .model(&self.embed_model)
+            .input(text)
+            .build()?;
+        let response = self.client.embeddings().create(request).await?;
+        Ok(response
+            .data
+            .into_iter()
+            .next()
+            .map(|e| e.embedding)
+            .unwrap_or_default())
+    }
+}
+
+// ── LocalLLM ──────────────────────────────────────────────────────────────────
+
+pub struct LocalLLM {
+    embedder: Arc<std::sync::Mutex<TextEmbedding>>,
+}
+
+impl LocalLLM {
+    pub fn new() -> Result<Self> {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        let cache_dir = std::path::PathBuf::from(home).join(".cache").join("fastembed");
+        std::fs::create_dir_all(&cache_dir)?;
+
+        let model = TextEmbedding::try_new(
+            InitOptionsWithLength::new(EmbeddingModel::NomicEmbedTextV15)
+                .with_cache_dir(cache_dir)
+                .with_show_download_progress(true),
+        )?;
+        Ok(Self { embedder: Arc::new(std::sync::Mutex::new(model)) })
+    }
+}
 
 impl LLM for LocalLLM {
     async fn chat(&self, _messages: &[Message]) -> Result<String> {
-        anyhow::bail!("LocalLLM not yet implemented")
+        anyhow::bail!("LocalLLM chat not yet implemented")
     }
 
-    async fn embed(&self, _text: &str) -> Result<Vec<f32>> {
-        anyhow::bail!("LocalLLM not yet implemented")
+    async fn embed(&self, text: &str) -> Result<Vec<f32>> {
+        let text = text.to_string();
+        let embedder = self.embedder.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut model = embedder.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
+            let mut results = model.embed(vec![text], None)?;
+            Ok(results.remove(0))
+        })
+        .await?
+    }
+}
+
+// ── Embedder enum (unified dispatch) ──────────────────────────────────────────
+
+/// Dispatches LLM calls to either a remote API or local fastembed/llama.cpp.
+/// Use this in main to avoid generics proliferation.
+pub enum Embedder {
+    Remote(RemoteLLM),
+    Local(LocalLLM),
+}
+
+impl LLM for Embedder {
+    async fn chat(&self, messages: &[Message]) -> Result<String> {
+        match self {
+            Self::Remote(r) => r.chat(messages).await,
+            Self::Local(l) => l.chat(messages).await,
+        }
+    }
+
+    async fn embed(&self, text: &str) -> Result<Vec<f32>> {
+        match self {
+            Self::Remote(r) => r.embed(text).await,
+            Self::Local(l) => l.embed(text).await,
+        }
     }
 }

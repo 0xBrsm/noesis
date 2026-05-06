@@ -60,6 +60,10 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub workspace: Option<PathBuf>,
 
+    /// Use local fastembed (nomic-embed-text-v1.5) instead of remote API for embeddings
+    #[arg(long, global = true)]
+    pub local_embed: bool,
+
     /// OpenAI-compatible API base URL
     #[arg(long, global = true)]
     pub base_url: Option<String>,

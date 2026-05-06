@@ -37,3 +37,4 @@ anyhow = "1"
 
 # Time
 chrono = { version = "0.4", features = ["serde"] }
+fastembed = "5.13.4"

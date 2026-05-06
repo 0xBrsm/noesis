@@ -5,3 +5,4 @@ linker = "clang"
 CC_aarch64_linux_android = "clang"
 CXX_aarch64_linux_android = "clang++"
 AR_aarch64_linux_android = "llvm-ar"
+ORT_CACHE_DIR = { value = ".ort-cache", relative = true }
