@@ -1674,28 +1674,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
-name = "llmchat"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-openai",
- "chrono",
- "clap",
- "fastembed",
- "futures",
- "hex",
- "hf-hub",
- "rusqlite",
- "rustyline",
- "serde",
- "sha2",
- "sqlite-vec",
- "tokio",
- "toml",
- "walkdir",
-]
-
-[[package]]
 name = "lock_api"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1914,6 +1892,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "418abd1b6d34fbf6cae440dc874771b0525a604428704c76e48b29a5e67b8003"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "noesis"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-openai",
+ "chrono",
+ "clap",
+ "fastembed",
+ "futures",
+ "hex",
+ "hf-hub",
+ "rusqlite",
+ "rustyline",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlite-vec",
+ "tokio",
+ "toml",
+ "walkdir",
 ]
 
 [[package]]

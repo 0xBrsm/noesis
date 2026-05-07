@@ -1,5 +1,5 @@
 [package]
-name = "llmchat"
+name = "noesis"
 version = "0.1.0"
 edition = "2024"
 
@@ -24,6 +24,7 @@ hex = "0.4"
 # Config
 toml = "0.8"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 # CLI / terminal
 clap = { version = "4", features = ["derive"] }

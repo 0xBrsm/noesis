@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use chrono::Local;
+use chrono::{Datelike, Local};
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
@@ -23,6 +23,7 @@ pub struct Memory {
     vector_weight: f32,
     text_weight: f32,
     vec_available: bool,
+    decay_half_life_days: f32,
 }
 
 impl Memory {
@@ -31,6 +32,9 @@ impl Memory {
         model: &str,
         chunk_tokens: usize,
         chunk_overlap: usize,
+        decay_half_life_days: f32,
+        semantic_weight: f32,
+        lexical_weight: f32,
     ) -> Result<Self> {
         let db_path = workspace.join("memory.db");
         let vec_available = db::register_vec_extension();
@@ -42,9 +46,10 @@ impl Memory {
             model: model.to_string(),
             chunk_tokens,
             chunk_overlap,
-            vector_weight: 0.7,
-            text_weight: 0.3,
+            vector_weight: semantic_weight,
+            text_weight: lexical_weight,
             vec_available,
+            decay_half_life_days,
         })
     }
 
@@ -207,6 +212,12 @@ impl Memory {
             }).collect();
         }
 
+        let now_days = now_unix_days();
+        for r in &mut results {
+            r.score *= decay_multiplier(&r.path, now_days, self.decay_half_life_days);
+        }
+        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+
         Ok(results)
     }
 
@@ -284,11 +295,57 @@ pub struct IndexResult {
     pub deleted: usize,
 }
 
+fn now_unix_days() -> f32 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f32()
+        / 86400.0
+}
+
+fn decay_multiplier(path: &str, now_days: f32, half_life: f32) -> f32 {
+    let filename = std::path::Path::new(path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+    // Only dated files (YYYY-MM-DD.md) decay; everything else is evergreen
+    if !is_dated_filename(filename) {
+        return 1.0;
+    }
+    let date_str = &filename[..10]; // "YYYY-MM-DD"
+    let file_days = match chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
+        Ok(d) => d.num_days_from_ce() as f32,
+        Err(_) => return 1.0,
+    };
+    let today_days = chrono::Local::now().date_naive().num_days_from_ce() as f32;
+    let age_days = (today_days - file_days).max(0.0);
+    let lambda = std::f32::consts::LN_2 / half_life;
+    (-lambda * age_days).exp()
+}
+
+fn is_dated_filename(name: &str) -> bool {
+    name.len() == 13 // "YYYY-MM-DD.md"
+        && name.ends_with(".md")
+        && name.as_bytes()[4] == b'-'
+        && name.as_bytes()[7] == b'-'
+        && name[..4].chars().all(|c| c.is_ascii_digit())
+        && name[5..7].chars().all(|c| c.is_ascii_digit())
+        && name[8..10].chars().all(|c| c.is_ascii_digit())
+}
+
+pub fn load_context_md(workspace: &Path) -> Option<String> {
+    let path = workspace.join("context.md");
+    std::fs::read_to_string(path).ok()
+}
+
 fn collect_md_files(dir: &Path) -> Vec<PathBuf> {
     WalkDir::new(dir)
         .into_iter()
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map_or(false, |x| x == "md"))
+        .filter(|e| {
+            let p = e.path();
+            p.extension().map_or(false, |x| x == "md")
+        })
         .map(|e| e.path().to_path_buf())
         .collect()
 }

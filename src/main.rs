@@ -35,12 +35,20 @@ async fn main() -> Result<()> {
         None
     };
 
+    // Chat always uses a remote LLM regardless of embed mode
+    let chat_llm = RemoteLLM::new(
+        &cfg.base_url,
+        &cfg.api_key,
+        &cfg.chat_model,
+        &cfg.embed_model,
+    );
+
     match &cli.command {
         Command::Index { force } => cmd_index(&cfg, &embedder, *force).await,
-        Command::Search { query, limit, keyword_only, full } => {
-            cmd_search(&cfg, &embedder, query, *limit, *keyword_only, reranker.as_ref(), *full).await
+        Command::Search { query, limit, lexical_only, full } => {
+            cmd_search(&cfg, &embedder, query, *limit, *lexical_only, reranker.as_ref(), *full).await
         }
-        Command::Chat => cmd_chat(&cfg, &embedder, reranker.as_ref()).await,
+        Command::Chat => cmd_chat(&cfg, &embedder, reranker.as_ref(), &chat_llm).await,
     }
 }
 
@@ -50,6 +58,9 @@ async fn cmd_index<L: LLM>(cfg: &config::Config, llm: &L, force: bool) -> Result
         &cfg.embed_model,
         cfg.chunk_tokens,
         cfg.chunk_overlap,
+        cfg.decay_half_life_days,
+        cfg.semantic_weight,
+        cfg.lexical_weight,
     )?;
 
     if force {
@@ -61,6 +72,9 @@ async fn cmd_index<L: LLM>(cfg: &config::Config, llm: &L, force: bool) -> Result
                 &cfg.embed_model,
                 cfg.chunk_tokens,
                 cfg.chunk_overlap,
+                cfg.decay_half_life_days,
+                cfg.semantic_weight,
+                cfg.lexical_weight,
             )?;
         }
     }
@@ -78,7 +92,7 @@ async fn cmd_search<L: LLM>(
     llm: &L,
     query: &str,
     limit: usize,
-    keyword_only: bool,
+    lexical_only: bool,
     reranker: Option<&Reranker>,
     full: bool,
 ) -> Result<()> {
@@ -87,9 +101,12 @@ async fn cmd_search<L: LLM>(
         &cfg.embed_model,
         cfg.chunk_tokens,
         cfg.chunk_overlap,
+        cfg.decay_half_life_days,
+        cfg.semantic_weight,
+        cfg.lexical_weight,
     )?;
 
-    let results = if keyword_only {
+    let results = if lexical_only {
         mem.search_keyword(query, limit)?
     } else {
         mem.search(query, limit, llm, reranker).await?
@@ -102,9 +119,9 @@ async fn cmd_search<L: LLM>(
 
     for (i, r) in results.iter().enumerate() {
         let score_detail = match (r.vector_score, r.text_score) {
-            (Some(v), Some(t)) => format!("vec={v:.3} fts={t:.3}"),
-            (Some(v), None)    => format!("vec={v:.3}"),
-            (None,    Some(t)) => format!("fts={t:.3}"),
+            (Some(v), Some(t)) => format!("sem={v:.3} lex={t:.3}"),
+            (Some(v), None)    => format!("sem={v:.3}"),
+            (None,    Some(t)) => format!("lex={t:.3}"),
             (None,    None)    => String::new(),
         };
 
@@ -134,10 +151,11 @@ async fn cmd_search<L: LLM>(
     Ok(())
 }
 
-async fn cmd_chat<L: LLM>(
+async fn cmd_chat<E: LLM>(
     cfg: &config::Config,
-    llm: &L,
+    embedder: &E,
     reranker: Option<&Reranker>,
+    chat_llm: &RemoteLLM,
 ) -> Result<()> {
     use crate::llm::{Message, Role};
     use rustyline::error::ReadlineError;
@@ -147,7 +165,12 @@ async fn cmd_chat<L: LLM>(
         &cfg.embed_model,
         cfg.chunk_tokens,
         cfg.chunk_overlap,
+        cfg.decay_half_life_days,
+        cfg.semantic_weight,
+        cfg.lexical_weight,
     )?;
+
+    let context_md = crate::memory::load_context_md(&cfg.workspace);
 
     let mut history: Vec<Message> = vec![];
     let mut rl = rustyline::DefaultEditor::new()?;
@@ -164,21 +187,42 @@ async fn cmd_chat<L: LLM>(
         if input.is_empty() { continue; }
         let _ = rl.add_history_entry(&input);
 
+        let t0 = std::time::Instant::now();
+
         let chunks = mem.search_for_context(
             &input,
-            llm,
+            embedder,
             reranker,
-            cfg.context_candidates,
-            cfg.context_limit,
-            cfg.context_threshold,
+            cfg.retrieval_candidates,
+            cfg.retrieval_limit,
+            cfg.retrieval_threshold,
         ).await?;
 
-        let system = build_system_prompt(&chunks);
-        let mut messages = vec![Message { role: Role::System, content: system }];
+        if cfg.debug {
+            eprintln!("[debug] retrieval: {:.2}s  chunks injected: {}", t0.elapsed().as_secs_f64(), chunks.len());
+            for c in &chunks {
+                eprintln!("[debug]   score={:.3}  {}:{}-{}", c.score, c.path, c.start_line, c.end_line);
+            }
+        }
+
+        let system = build_system_prompt(&chunks, context_md.as_deref());
+        let mut messages = vec![Message { role: Role::System, content: system.clone() }];
         messages.extend_from_slice(&history);
         messages.push(Message { role: Role::User, content: input.clone() });
 
-        let response = llm.chat_stream(&messages).await?;
+        if cfg.debug {
+            eprintln!("[debug] full prompt ({} messages):", messages.len());
+            for m in &messages {
+                eprintln!("[debug] [{:?}] {}", m.role, m.content.chars().take(300).collect::<String>());
+            }
+            eprintln!("[debug] sending to {} at {:.2}s", cfg.chat_model, t0.elapsed().as_secs_f64());
+        }
+
+        let response = chat_llm.chat_stream_debug(&messages, cfg.debug).await?;
+
+        if cfg.debug {
+            eprintln!("[debug] turn total: {:.2}s", t0.elapsed().as_secs_f64());
+        }
 
         history.push(Message { role: Role::User, content: input });
         history.push(Message { role: Role::Assistant, content: response });
@@ -189,10 +233,11 @@ async fn cmd_chat<L: LLM>(
     Ok(())
 }
 
-fn build_system_prompt(chunks: &[SearchRow]) -> String {
-    let mut s = String::from(
-        "You are a helpful assistant with access to the user's memory store.\n"
-    );
+fn build_system_prompt(chunks: &[SearchRow], context_md: Option<&str>) -> String {
+    let mut s = match context_md {
+        Some(ctx) if !ctx.trim().is_empty() => format!("{}\n", ctx.trim()),
+        _ => String::from("You are a helpful assistant with access to the user's memory store.\n"),
+    };
     if chunks.is_empty() {
         return s;
     }

@@ -2,6 +2,9 @@
 /target
 /.ort-cache
 
+# Vendored dependencies
+/vendor
+
 # Environment
 .env
 

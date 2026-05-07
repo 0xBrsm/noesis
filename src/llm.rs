@@ -86,10 +86,7 @@ impl RemoteLLM {
         }
     }
 
-}
-
-impl LLM for RemoteLLM {
-    async fn chat_stream(&self, messages: &[Message]) -> Result<String> {
+    pub async fn chat_stream_debug(&self, messages: &[Message], debug: bool) -> Result<String> {
         let msgs: Vec<ChatCompletionRequestMessage> =
             messages.iter().map(|m| m.into()).collect();
 
@@ -99,12 +96,26 @@ impl LLM for RemoteLLM {
             .stream(true)
             .build()?;
 
+        if debug {
+            if let Ok(json) = serde_json::to_string_pretty(&request) {
+                eprintln!("[debug] API request JSON:\n{json}");
+            }
+        }
+
+        let t0 = std::time::Instant::now();
         let mut stream = self.client.chat().create_stream(request).await?;
         let mut full = String::new();
+        let mut first_token = true;
 
         while let Some(chunk) = stream.next().await {
             for choice in chunk?.choices {
                 if let Some(content) = choice.delta.content {
+                    if first_token {
+                        if debug {
+                            eprintln!("[debug] TTFT: {:.2}s", t0.elapsed().as_secs_f64());
+                        }
+                        first_token = false;
+                    }
                     print!("{content}");
                     std::io::stdout().flush()?;
                     full.push_str(&content);
@@ -112,7 +123,16 @@ impl LLM for RemoteLLM {
             }
         }
         println!();
+        if debug {
+            eprintln!("[debug] total stream: {:.2}s  words≈{}", t0.elapsed().as_secs_f64(), full.split_whitespace().count());
+        }
         Ok(full)
+    }
+}
+
+impl LLM for RemoteLLM {
+    async fn chat_stream(&self, messages: &[Message]) -> Result<String> {
+        self.chat_stream_debug(messages, false).await
     }
 
     async fn chat(&self, messages: &[Message]) -> Result<String> {
