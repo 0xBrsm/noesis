@@ -7,7 +7,7 @@ use walkdir::WalkDir;
 use crate::db::{self, SearchRow};
 use crate::llm::{LLM, Reranker};
 
-const FLUSH_SYSTEM_PROMPT: &str = "\
+const EXTRACT_PROMPT: &str = "\
 You are extracting durable facts from a conversation to store in long-term memory.
 Write only facts worth keeping across future sessions: decisions made, preferences \
 expressed, important context, things the user wants to be remembered.
@@ -187,6 +187,10 @@ impl Memory {
         db::last_response_id(&self.conn)
     }
 
+    pub fn sessions_since(&self, since_ts: f64) -> Result<usize> {
+        db::count_sessions_since(&self.conn, since_ts)
+    }
+
     // ── Search ────────────────────────────────────────────────────────────────
 
     pub fn search_keyword(&self, query: &str, limit: usize) -> Result<Vec<SearchRow>> {
@@ -249,20 +253,28 @@ impl Memory {
         Ok(results.into_iter().filter(|r| r.raw_score >= threshold).take(max_results).collect())
     }
 
-    // ── Flush ─────────────────────────────────────────────────────────────────
+    // ── Dream extraction ──────────────────────────────────────────────────────
 
-    pub async fn flush<L: LLM>(
+    /// Extract durable facts from `turns` (recent conversation) and append to
+    /// today's dated memory file, then re-index it. Called by the dream trigger.
+    pub async fn extract_to_memory<L: LLM>(
         &mut self,
-        conversation: &[crate::llm::Message],
+        turns: &[(String, String)],
         llm: &L,
     ) -> Result<Option<String>> {
         use crate::llm::{Message, Role};
 
         let mut messages = vec![Message {
             role: Role::System,
-            content: FLUSH_SYSTEM_PROMPT.to_string(),
+            content: EXTRACT_PROMPT.to_string(),
         }];
-        messages.extend_from_slice(conversation);
+        for (role, content) in turns {
+            let r = match role.as_str() {
+                "assistant" => Role::Assistant,
+                _ => Role::User,
+            };
+            messages.push(Message { role: r, content: content.clone() });
+        }
 
         let response = llm.chat(&messages).await?;
         let extracted = response.trim().to_string();
@@ -285,7 +297,6 @@ impl Memory {
             std::fs::write(&dated_file, format!("{extracted}\n"))?;
         }
 
-        // Re-index the updated file
         let content = std::fs::read_to_string(&dated_file)?;
         let hash = db::sha256(&content);
         let meta = dated_file.metadata()?;

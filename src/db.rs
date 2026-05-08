@@ -295,6 +295,16 @@ pub fn load_recent_turns(conn: &Connection) -> Result<Vec<(String, String)>> {
     Ok(turns)
 }
 
+/// Count distinct sessions that have turns after `since_ts` (unix seconds as f64).
+pub fn count_sessions_since(conn: &Connection, since_ts: f64) -> Result<usize> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(DISTINCT session_id) FROM conversations WHERE ts > ?",
+        [since_ts],
+        |r| r.get(0),
+    )?;
+    Ok(count as usize)
+}
+
 // ── Search ────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]

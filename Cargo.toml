@@ -28,9 +28,10 @@ serde_json = "1"
 
 # CLI / terminal
 clap = { version = "4", features = ["derive"] }
-rustyline = "14"
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
 
-# Streaming
+# Async streams
 futures = "0.3"
 
 # Error handling

@@ -13,7 +13,6 @@ use fastembed::{
     TextEmbedding, TextRerank, TokenizerFiles, UserDefinedRerankingModel,
 };
 use std::future::Future;
-use std::io::Write;
 use std::sync::Arc;
 
 // ── Message types ─────────────────────────────────────────────────────────────
@@ -139,10 +138,6 @@ impl RemoteLLM {
                 response.id,
             );
         }
-
-        print!("{text}");
-        println!();
-        std::io::stdout().flush()?;
 
         Ok((text, response.id))
     }

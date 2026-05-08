@@ -24,9 +24,6 @@ pub struct Config {
     pub retrieval_limit: usize,       // max chunks injected into prompt
     pub retrieval_threshold: f32,     // min score after reranking to include
 
-    // Chat
-    pub flush_every: usize,
-
     // Memory
     pub decay_half_life_days: f32,
 
@@ -48,7 +45,6 @@ impl Default for Config {
             retrieval_candidates: 10,
             retrieval_limit: 3,
             retrieval_threshold: 0.5,
-            flush_every: 10,
             decay_half_life_days: 30.0,
             debug: false,
         }
@@ -68,7 +64,6 @@ struct TomlConfig {
     retrieval_candidates: Option<usize>,
     retrieval_limit: Option<usize>,
     retrieval_threshold: Option<f32>,
-    flush_every: Option<usize>,
     decay_half_life_days: Option<f32>,
 }
 
@@ -171,7 +166,6 @@ pub fn load(cli: &Cli) -> Result<Config> {
             if let Some(v) = toml.retrieval_candidates { cfg.retrieval_candidates = v; }
             if let Some(v) = toml.retrieval_limit      { cfg.retrieval_limit      = v; }
             if let Some(v) = toml.retrieval_threshold  { cfg.retrieval_threshold  = v; }
-            if let Some(v) = toml.flush_every          { cfg.flush_every          = v; }
             if let Some(v) = toml.decay_half_life_days { cfg.decay_half_life_days = v; }
         }
     }
