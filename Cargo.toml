@@ -1,46 +1,63 @@
-[package]
-name = "noesis"
+[workspace]
+resolver = "2"
+members = [
+    "crates/memory",
+    "crates/proxy",
+]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
+authors = ["Noesis"]
+license = "GPL-3.0"
 
-[dependencies]
+[workspace.dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+async-trait = "0.1"
 
-# LLM API (OpenAI-compatible)
-async-openai = "0.28"
+# HTTP (proxy + clients)
+axum = { version = "0.7", features = ["macros"] }
+reqwest = { version = "0.12", features = ["json", "stream"], default-features = false }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace"] }
+hyper = { version = "1", features = ["full"] }
+bytes = "1"
 
-# SQLite
-rusqlite = { version = "0.32", features = ["bundled", "load_extension"] }
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
 
-# sqlite-vec extension
-sqlite-vec = "0.1"
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
 
-# Markdown / file handling
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Utilities
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
 walkdir = "2"
 sha2 = "0.10"
 hex = "0.4"
 
-# Config
-toml = "0.8"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# Storage
+rusqlite = { version = "0.32", features = ["bundled", "load_extension"] }
+sqlite-vec = "0.1"
 
-# CLI / terminal
-clap = { version = "4", features = ["derive"] }
-ratatui = "0.29"
-crossterm = { version = "0.28", features = ["event-stream"] }
+# LLM clients
+async-openai = "0.28"
 
-# Async streams
-futures = "0.3"
-
-# Error handling
-anyhow = "1"
-
-# UUID
-uuid = { version = "1", features = ["v4"] }
-
-# Time
-chrono = { version = "0.4", features = ["serde"] }
+# Local embeddings / reranking
 fastembed = "5.13.4"
 hf-hub = { version = "0.5", features = ["ureq", "native-tls"] }
+
+# Workspace crates
+noesis-memory = { path = "crates/memory" }

@@ -1,0 +1,39 @@
+[package]
+name = "noesis-memory"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+
+# Storage
+rusqlite = { workspace = true }
+sqlite-vec = { workspace = true }
+
+# LLM clients
+async-openai = { workspace = true }
+
+# Local embeddings / reranking
+fastembed = { workspace = true }
+hf-hub = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+
+# Utilities
+uuid = { workspace = true }
+chrono = { workspace = true }
+walkdir = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+tracing = { workspace = true }
+
+# CLI types live in config.rs for now (until refactored out)
+clap = { workspace = true }

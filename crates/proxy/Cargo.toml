@@ -1,0 +1,37 @@
+[package]
+name = "noesis-proxy"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "noesis-proxy"
+path = "src/main.rs"
+
+[dependencies]
+noesis-memory = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true }
+futures = { workspace = true }
+
+# HTTP server + client
+axum = { workspace = true }
+reqwest = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+hyper = { workspace = true }
+bytes = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# CLI
+clap = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
