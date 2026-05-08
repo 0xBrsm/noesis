@@ -104,7 +104,7 @@ impl RemoteLLM {
             input,
             instructions,
             previous_response_id: previous_response_id.map(str::to_string),
-            store: Some(previous_response_id.is_some()),
+            store: Some(true),
             ..Default::default()
         };
 
@@ -176,17 +176,25 @@ pub struct LocalLLM {
 }
 
 impl LocalLLM {
-    pub fn new() -> Result<Self> {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        let cache_dir = std::path::PathBuf::from(home).join(".cache").join("fastembed");
-        std::fs::create_dir_all(&cache_dir)?;
-
+    pub fn new(models_dir: &std::path::Path, model_name: &str) -> Result<Self> {
+        std::fs::create_dir_all(models_dir)?;
+        let variant = embed_model_from_str(model_name);
         let model = TextEmbedding::try_new(
-            InitOptionsWithLength::new(EmbeddingModel::AllMiniLML6V2Q)
-                .with_cache_dir(cache_dir)
+            InitOptionsWithLength::new(variant)
+                .with_cache_dir(models_dir.to_path_buf())
                 .with_show_download_progress(true),
         )?;
         Ok(Self { embedder: Arc::new(std::sync::Mutex::new(model)) })
+    }
+}
+
+fn embed_model_from_str(name: &str) -> EmbeddingModel {
+    match name {
+        "Xenova/all-MiniLM-L6-v2" | "all-MiniLM-L6-v2" => EmbeddingModel::AllMiniLML6V2Q,
+        _ => {
+            eprintln!("unknown embed model '{name}', defaulting to AllMiniLML6V2Q");
+            EmbeddingModel::AllMiniLML6V2Q
+        }
     }
 }
 
@@ -245,7 +253,6 @@ impl LLM for Embedder {
 
 // ── Reranker ──────────────────────────────────────────────────────────────────
 
-const RERANKER_REPO: &str = "Xenova/ms-marco-MiniLM-L-6-v2";
 const RERANKER_ONNX: &str = "onnx/model_int8.onnx";
 
 pub struct Reranker {
@@ -253,12 +260,9 @@ pub struct Reranker {
 }
 
 impl Reranker {
-    pub fn new() -> Result<Self> {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        let cache_dir = std::path::PathBuf::from(&home).join(".cache").join("fastembed");
-        std::fs::create_dir_all(&cache_dir)?;
-
-        let model_dir = download_reranker(&cache_dir)?;
+    pub fn new(models_dir: &std::path::Path, model_name: &str) -> Result<Self> {
+        std::fs::create_dir_all(models_dir)?;
+        let model_dir = download_reranker(models_dir, model_name)?;
         let model = load_reranker(&model_dir)?;
         Ok(Self { inner: Arc::new(std::sync::Mutex::new(model)) })
     }
@@ -280,13 +284,13 @@ fn sigmoid(x: f32) -> f32 {
     1.0 / (1.0 + (-x).exp())
 }
 
-fn download_reranker(cache_dir: &std::path::Path) -> Result<std::path::PathBuf> {
+fn download_reranker(models_dir: &std::path::Path, model_name: &str) -> Result<std::path::PathBuf> {
     use hf_hub::{Cache, api::sync::ApiBuilder};
 
-    let cache = Cache::new(cache_dir.to_path_buf());
+    let cache = Cache::new(models_dir.to_path_buf());
     let api = ApiBuilder::from_cache(cache).with_progress(true).build()
         .map_err(|e| anyhow::anyhow!("hf-hub init: {e}"))?;
-    let repo = api.model(RERANKER_REPO.to_string());
+    let repo = api.model(model_name.to_string());
 
     // Download required files (hf-hub caches them automatically)
     for file in &[RERANKER_ONNX, "tokenizer.json", "config.json",

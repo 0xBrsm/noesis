@@ -17,9 +17,10 @@ async fn main() -> Result<()> {
     let cli = config::Cli::parse();
     let cfg = config::load(&cli)?;
 
-    let embedder: Embedder = if cli.local_embed {
-        println!("loading local embedder (all-MiniLM-L6-v2-Q)...");
-        Embedder::Local(LocalLLM::new()?)
+    let models_dir = cfg.data_dir.join("models");
+    let embedder: Embedder = if cfg.local_embed {
+        eprintln!("loading local embedder ({})...", cfg.local_embed_model);
+        Embedder::Local(LocalLLM::new(&models_dir, &cfg.local_embed_model)?)
     } else {
         Embedder::Remote(RemoteLLM::new(
             &cfg.base_url,
@@ -29,9 +30,9 @@ async fn main() -> Result<()> {
         ))
     };
 
-    let reranker: Option<Reranker> = if cli.local_embed {
-        println!("loading reranker (ms-marco-MiniLM-L-6-v2)...");
-        Some(Reranker::new()?)
+    let reranker: Option<Reranker> = if cfg.local_embed {
+        eprintln!("loading reranker ({})...", cfg.rerank_model);
+        Some(Reranker::new(&models_dir, &cfg.rerank_model)?)
     } else {
         None
     };
@@ -43,7 +44,7 @@ async fn main() -> Result<()> {
         &cfg.embed_model,
     );
 
-    match &cli.command {
+    match cli.command.as_ref().unwrap_or(&Command::Chat) {
         Command::Index { force } => cmd_index(&cfg, &embedder, *force).await,
         Command::Search { query, limit, lexical_only, full } => {
             cmd_search(&cfg, &embedder, query, *limit, *lexical_only, reranker.as_ref(), *full).await
@@ -51,6 +52,7 @@ async fn main() -> Result<()> {
         Command::Chat => {
             let mut mem = Memory::open(
                 &cfg.workspace,
+                &cfg.data_dir,
                 &cfg.embed_model,
                 cfg.decay_half_life_days,
                 cfg.semantic_weight,
@@ -64,6 +66,7 @@ async fn main() -> Result<()> {
 async fn cmd_index<L: LLM>(cfg: &config::Config, llm: &L, force: bool) -> Result<()> {
     let mut mem = Memory::open(
         &cfg.workspace,
+        &cfg.data_dir,
         &cfg.embed_model,
         cfg.decay_half_life_days,
         cfg.semantic_weight,
@@ -71,11 +74,12 @@ async fn cmd_index<L: LLM>(cfg: &config::Config, llm: &L, force: bool) -> Result
     )?;
 
     if force {
-        let db_path = cfg.workspace.join("memory.db");
+        let db_path = cfg.data_dir.join("memory.db");
         if db_path.exists() {
             std::fs::remove_file(&db_path)?;
             mem = Memory::open(
                 &cfg.workspace,
+                &cfg.data_dir,
                 &cfg.embed_model,
                 cfg.decay_half_life_days,
                 cfg.semantic_weight,
@@ -85,10 +89,7 @@ async fn cmd_index<L: LLM>(cfg: &config::Config, llm: &L, force: bool) -> Result
     }
 
     let r = mem.index(llm).await?;
-    println!(
-        "indexed: {}  skipped: {}  deleted: {}",
-        r.indexed, r.skipped, r.deleted
-    );
+    println!("indexed: {}  skipped: {}  deleted: {}", r.indexed, r.skipped, r.deleted);
     Ok(())
 }
 
@@ -103,6 +104,7 @@ async fn cmd_search<L: LLM>(
 ) -> Result<()> {
     let mem = Memory::open(
         &cfg.workspace,
+        &cfg.data_dir,
         &cfg.embed_model,
         cfg.decay_half_life_days,
         cfg.semantic_weight,
@@ -127,19 +129,13 @@ async fn cmd_search<L: LLM>(
             (None,    Some(t)) => format!("lex={t:.3}"),
             (None,    None)    => String::new(),
         };
-
-        println!(
-            "[{}] score={:.3}  {}  {}:{}-{}",
-            i + 1, r.score, score_detail, r.path, r.start_line, r.end_line,
-        );
-
+        println!("[{}] score={:.3}  {}  {}:{}-{}", i + 1, r.score, score_detail, r.path, r.start_line, r.end_line);
         let text = r.text.trim();
         let display = if full || text.len() <= 200 {
             text.to_string()
         } else {
             format!("{}…", &text[..200])
         };
-
         for line in display.lines() {
             println!("    {line}");
         }

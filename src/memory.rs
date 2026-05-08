@@ -16,7 +16,7 @@ If there is nothing worth storing, reply with exactly: @@SILENT@@";
 
 pub struct Memory {
     conn: Connection,
-    workspace: PathBuf,
+    workspace: PathBuf,  // ~/noesis — user files (memory/, context.md)
     model: String,
     vector_weight: f32,
     text_weight: f32,
@@ -27,14 +27,16 @@ pub struct Memory {
 impl Memory {
     pub fn open(
         workspace: &Path,
+        data_dir: &Path,
         model: &str,
         decay_half_life_days: f32,
         semantic_weight: f32,
         lexical_weight: f32,
     ) -> Result<Self> {
-        let db_path = workspace.join("memory.db");
-        let vec_available = db::register_vec_extension();
+        let db_path = data_dir.join("memory.db");
+        let _ = db::register_vec_extension();
         let conn = db::open(&db_path)?;
+        let vec_available = db::vec_table_exists(&conn);
 
         Ok(Self {
             conn,

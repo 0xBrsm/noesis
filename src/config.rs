@@ -9,20 +9,24 @@ pub struct Config {
     pub base_url: String,
     pub api_key: String,
     pub chat_model: String,
-    pub embed_model: String,
+    pub embed_model: String,        // remote embed model
+    pub local_embed: bool,
+    pub local_embed_model: String,  // fastembed model name
+    pub rerank_model: String,       // reranker model name
 
-    // Workspace
-    pub workspace: PathBuf,
+    // Paths
+    pub workspace: PathBuf,         // ~/noesis  — user files
+    pub data_dir: PathBuf,          // ~/.noesis — db, models, config
 
-    // Search (noesis search command — results shown to user)
+    // Search
     pub search_results: usize,
     pub semantic_weight: f32,
     pub lexical_weight: f32,
 
     // Retrieval (chat context injection)
-    pub retrieval_candidates: usize,  // candidates fetched before reranking
-    pub retrieval_limit: usize,       // max chunks injected into prompt
-    pub retrieval_threshold: f32,     // min score after reranking to include
+    pub retrieval_candidates: usize,
+    pub retrieval_limit: usize,
+    pub retrieval_threshold: f32,
 
     // Memory
     pub decay_half_life_days: f32,
@@ -33,12 +37,17 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        let home = PathBuf::from(home);
         Self {
             base_url: "http://localhost:11434/v1".to_string(),
             api_key: "ollama".to_string(),
             chat_model: "llama3.2".to_string(),
             embed_model: "nomic-embed-text".to_string(),
-            workspace: PathBuf::from(home).join(".noesis"),
+            local_embed: false,
+            local_embed_model: "Xenova/all-MiniLM-L6-v2".to_string(),
+            rerank_model: "Xenova/ms-marco-MiniLM-L-6-v2".to_string(),
+            workspace: home.join("noesis"),
+            data_dir: home.join(".noesis"),
             search_results: 5,
             semantic_weight: 0.7,
             lexical_weight: 0.3,
@@ -57,7 +66,11 @@ struct TomlConfig {
     api_key: Option<String>,
     chat_model: Option<String>,
     embed_model: Option<String>,
+    local_embed: Option<bool>,
+    local_embed_model: Option<String>,
+    rerank_model: Option<String>,
     workspace: Option<PathBuf>,
+    data_dir: Option<PathBuf>,
     search_results: Option<usize>,
     semantic_weight: Option<f32>,
     lexical_weight: Option<f32>,
@@ -68,40 +81,36 @@ struct TomlConfig {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "noesis", about = "Local LLM chat with persistent memory")]
+#[command(name = "noesis", about = "Personal memory chat agent")]
+#[command(subcommand_required = false, arg_required_else_help = false)]
 pub struct Cli {
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
 
-    /// Path to config TOML
     #[arg(long, global = true)]
     pub config: Option<PathBuf>,
 
-    /// Workspace directory for memory files
     #[arg(long, global = true)]
     pub workspace: Option<PathBuf>,
 
-    /// Use local fastembed (all-MiniLM-L6-v2-Q) instead of remote API for embeddings
+    #[arg(long, global = true)]
+    pub data_dir: Option<PathBuf>,
+
     #[arg(long, global = true)]
     pub local_embed: bool,
 
-    /// Print debug timing and full prompts to stderr
     #[arg(long, global = true)]
     pub debug: bool,
 
-    /// OpenAI-compatible API base URL
     #[arg(long, global = true)]
     pub base_url: Option<String>,
 
-    /// API key
     #[arg(long, global = true)]
     pub api_key: Option<String>,
 
-    /// Chat model name
     #[arg(long, global = true)]
     pub chat_model: Option<String>,
 
-    /// Embedding model name
     #[arg(long, global = true)]
     pub embed_model: Option<String>,
 }
@@ -110,28 +119,20 @@ pub struct Cli {
 pub enum Command {
     /// Scan workspace and index memory files
     Index {
-        /// Force re-index even if files are unchanged
         #[arg(long)]
         force: bool,
     },
     /// Search memory and print ranked results
     Search {
-        /// Search query
         query: String,
-
-        /// Number of results to return
         #[arg(short, long, default_value = "5")]
         limit: usize,
-
-        /// Use lexical (FTS5) search only, skip vector search
         #[arg(long)]
         lexical_only: bool,
-
-        /// Show full chunk text instead of a truncated snippet
         #[arg(long)]
         full: bool,
     },
-    /// Interactive chat
+    /// Interactive chat (default)
     Chat,
 }
 
@@ -150,34 +151,42 @@ pub fn load(cli: &Cli) -> Result<Config> {
         }
     }
 
+    // Config file: CLI --config > ~/.noesis/config.toml
     let toml_path = cli.config.clone().or_else(default_config_path);
     if let Some(path) = toml_path {
         if path.exists() {
             let text = std::fs::read_to_string(&path)?;
             let toml: TomlConfig = toml::from_str(&text)?;
-            if let Some(v) = toml.base_url             { cfg.base_url             = v; }
-            if let Some(v) = toml.api_key              { cfg.api_key              = v; }
-            if let Some(v) = toml.chat_model           { cfg.chat_model           = v; }
-            if let Some(v) = toml.embed_model          { cfg.embed_model          = v; }
-            if let Some(v) = toml.workspace            { cfg.workspace            = v; }
-            if let Some(v) = toml.search_results       { cfg.search_results       = v; }
-            if let Some(v) = toml.semantic_weight      { cfg.semantic_weight      = v; }
-            if let Some(v) = toml.lexical_weight       { cfg.lexical_weight       = v; }
-            if let Some(v) = toml.retrieval_candidates { cfg.retrieval_candidates = v; }
-            if let Some(v) = toml.retrieval_limit      { cfg.retrieval_limit      = v; }
-            if let Some(v) = toml.retrieval_threshold  { cfg.retrieval_threshold  = v; }
-            if let Some(v) = toml.decay_half_life_days { cfg.decay_half_life_days = v; }
+            if let Some(v) = toml.base_url            { cfg.base_url            = v; }
+            if let Some(v) = toml.api_key             { cfg.api_key             = v; }
+            if let Some(v) = toml.chat_model          { cfg.chat_model          = v; }
+            if let Some(v) = toml.embed_model         { cfg.embed_model         = v; }
+            if let Some(v) = toml.local_embed         { cfg.local_embed         = v; }
+            if let Some(v) = toml.local_embed_model   { cfg.local_embed_model   = v; }
+            if let Some(v) = toml.rerank_model        { cfg.rerank_model        = v; }
+            if let Some(v) = toml.workspace           { cfg.workspace           = v; }
+            if let Some(v) = toml.data_dir            { cfg.data_dir            = v; }
+            if let Some(v) = toml.search_results      { cfg.search_results      = v; }
+            if let Some(v) = toml.semantic_weight     { cfg.semantic_weight     = v; }
+            if let Some(v) = toml.lexical_weight      { cfg.lexical_weight      = v; }
+            if let Some(v) = toml.retrieval_candidates{ cfg.retrieval_candidates= v; }
+            if let Some(v) = toml.retrieval_limit     { cfg.retrieval_limit     = v; }
+            if let Some(v) = toml.retrieval_threshold { cfg.retrieval_threshold = v; }
+            if let Some(v) = toml.decay_half_life_days{ cfg.decay_half_life_days= v; }
         }
     }
 
-    if let Some(v) = &cli.base_url    { cfg.base_url    = v.clone(); }
-    if let Some(v) = &cli.api_key     { cfg.api_key     = v.clone(); }
-    if let Some(v) = &cli.chat_model  { cfg.chat_model  = v.clone(); }
-    if let Some(v) = &cli.embed_model { cfg.embed_model = v.clone(); }
-    if let Some(v) = &cli.workspace   { cfg.workspace   = v.clone(); }
+    // CLI flags override
+    if let Some(v) = &cli.base_url   { cfg.base_url   = v.clone(); }
+    if let Some(v) = &cli.api_key    { cfg.api_key    = v.clone(); }
+    if let Some(v) = &cli.chat_model { cfg.chat_model = v.clone(); }
+    if let Some(v) = &cli.embed_model{ cfg.embed_model= v.clone(); }
+    if let Some(v) = &cli.workspace  { cfg.workspace  = v.clone(); }
+    if let Some(v) = &cli.data_dir   { cfg.data_dir   = v.clone(); }
+    if cli.local_embed               { cfg.local_embed = true; }
     cfg.debug = cli.debug;
 
-    // OPENAI_API_KEY in environment overrides config
+    // OPENAI_API_KEY auto-detect
     if let Ok(k) = std::env::var("OPENAI_API_KEY") {
         if !k.is_empty() {
             cfg.api_key = k;
@@ -187,6 +196,9 @@ pub fn load(cli: &Cli) -> Result<Config> {
             if cfg.chat_model == "llama3.2" {
                 cfg.chat_model = "gpt-5".to_string();
             }
+            if cfg.embed_model == "nomic-embed-text" {
+                cfg.embed_model = "text-embedding-3-small".to_string();
+            }
         }
     }
 
@@ -195,5 +207,5 @@ pub fn load(cli: &Cli) -> Result<Config> {
 
 fn default_config_path() -> Option<PathBuf> {
     let home = std::env::var("HOME").ok()?;
-    Some(PathBuf::from(home).join(".config").join("noesis").join("config.toml"))
+    Some(PathBuf::from(home).join(".noesis").join("config.toml"))
 }

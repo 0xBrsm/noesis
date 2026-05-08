@@ -130,7 +130,7 @@ async fn chat_loop<E: LLM>(
 ) -> Result<()> {
     let mut app = App::new();
     let context_md = crate::memory::load_context_md(&cfg.workspace);
-    let dream = AutoDream::new(&cfg.workspace);
+    let dream = AutoDream::new(&cfg.data_dir);
 
     // Load prior history for display
     for (role, content) in mem.load_recent_turns()? {

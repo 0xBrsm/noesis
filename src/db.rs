@@ -69,6 +69,14 @@ fn ensure_schema(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+pub fn vec_table_exists(conn: &Connection) -> bool {
+    conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='chunks_vec'",
+        [],
+        |r| r.get::<_, i64>(0),
+    ).unwrap_or(0) > 0
+}
+
 pub fn ensure_vec_table(conn: &Connection, dims: usize) -> Result<()> {
     conn.execute_batch(&format!(
         "CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(

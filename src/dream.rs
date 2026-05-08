@@ -38,11 +38,11 @@ pub struct AutoDream {
 }
 
 impl AutoDream {
-    pub fn new(workspace: &PathBuf) -> Self {
+    pub fn new(data_dir: &PathBuf) -> Self {
         Self {
             config: AutoDreamConfig::default(),
-            lock_file: workspace.join(".consolidation_lock"),
-            state_file: workspace.join(".consolidation_state.json"),
+            lock_file: data_dir.join(".consolidation_lock"),
+            state_file: data_dir.join(".consolidation_state.json"),
         }
     }
 
