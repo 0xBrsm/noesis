@@ -52,6 +52,19 @@ fn ensure_schema(conn: &Connection) -> Result<()> {
             start_line UNINDEXED,
             end_line   UNINDEXED
         );
+
+        CREATE TABLE IF NOT EXISTS conversations (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id  TEXT NOT NULL,
+            turn_index  INTEGER NOT NULL,
+            role        TEXT NOT NULL,
+            content     TEXT NOT NULL,
+            response_id TEXT,
+            ts          REAL NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS conversations_session
+            ON conversations (session_id, turn_index);
     ")?;
     Ok(())
 }
@@ -73,65 +86,73 @@ pub struct Chunk {
     pub start_line: usize,
     pub end_line: usize,
     pub text: String,
+    /// Header hierarchy path prepended to the embedding input (not stored in DB).
+    /// e.g. "Setup > Installation"
+    pub context: String,
 }
 
-pub fn chunk_markdown(content: &str, chunk_tokens: usize, overlap_tokens: usize) -> Vec<Chunk> {
-    let max_chars = (chunk_tokens * 4).max(32);
-    let overlap_chars = overlap_tokens * 4;
-
+/// Split markdown on header boundaries (#/##/###).
+/// Each section (header + body) becomes one chunk.
+/// Content before the first header is its own chunk with empty context.
+/// `context` is the breadcrumb path of parent headers, used for contextual embedding.
+pub fn chunk_markdown(content: &str) -> Vec<Chunk> {
+    let lines: Vec<&str> = content.lines().collect();
     let mut chunks: Vec<Chunk> = Vec::new();
-    // buffer: (owned text segment, 1-indexed line number)
-    let mut current: Vec<(String, usize)> = Vec::new();
-    let mut current_chars: usize = 0;
 
-    let do_flush = |current: &[(String, usize)], chunks: &mut Vec<Chunk>| {
-        if current.is_empty() { return; }
+    // Track header hierarchy [h1, h2, h3]
+    let mut headers: [Option<String>; 3] = [None, None, None];
+
+    let mut section_start: usize = 0;
+    let mut section_lines: Vec<&str> = Vec::new();
+    let mut section_context = String::new();
+
+    let flush = |lines: &[&str], start: usize, context: &str, chunks: &mut Vec<Chunk>| {
+        let text = lines.join("\n").trim().to_string();
+        if text.is_empty() { return; }
         chunks.push(Chunk {
-            start_line: current[0].1,
-            end_line: current[current.len() - 1].1,
-            text: current.iter().map(|(t, _)| t.as_str()).collect::<Vec<_>>().join("\n"),
+            start_line: start + 1,
+            end_line: start + lines.len(),
+            text,
+            context: context.to_string(),
         });
     };
 
-    let do_overlap = |current: &[(String, usize)]| -> (Vec<(String, usize)>, usize) {
-        if overlap_chars == 0 || current.is_empty() { return (vec![], 0); }
-        let mut acc = 0usize;
-        let mut kept: Vec<(String, usize)> = Vec::new();
-        for entry in current.iter().rev() {
-            acc += entry.0.len() + 1;
-            kept.insert(0, entry.clone());
-            if acc >= overlap_chars { break; }
-        }
-        let chars = kept.iter().map(|(t, _)| t.len() + 1).sum();
-        (kept, chars)
-    };
+    for (i, &line) in lines.iter().enumerate() {
+        let level = header_level(line);
+        if let Some(lvl) = level {
+            // Flush current section
+            flush(&section_lines, section_start, &section_context, &mut chunks);
 
-    for (i, raw_line) in content.split('\n').enumerate() {
-        let line_no = i + 1;
-        let segments: Vec<String> = if raw_line.is_empty() {
-            vec![String::new()]
+            // Update header hierarchy
+            let title = line.trim_start_matches('#').trim().to_string();
+            headers[lvl] = Some(title);
+            // Clear deeper levels
+            for h in headers.iter_mut().skip(lvl + 1) { *h = None; }
+
+            section_context = headers.iter()
+                .filter_map(|h| h.as_deref())
+                .collect::<Vec<_>>()
+                .join(" > ");
+
+            section_start = i;
+            section_lines = vec![line];
         } else {
-            raw_line
-                .as_bytes()
-                .chunks(max_chars)
-                .map(|c| String::from_utf8_lossy(c).into_owned())
-                .collect()
-        };
-
-        for segment in segments {
-            let line_size = segment.len() + 1;
-            if current_chars + line_size > max_chars && !current.is_empty() {
-                do_flush(&current, &mut chunks);
-                let (kept, kept_chars) = do_overlap(&current);
-                current = kept;
-                current_chars = kept_chars;
-            }
-            current_chars += line_size;
-            current.push((segment, line_no));
+            section_lines.push(line);
         }
     }
-    do_flush(&current, &mut chunks);
+    flush(&section_lines, section_start, &section_context, &mut chunks);
+
     chunks
+}
+
+fn header_level(line: &str) -> Option<usize> {
+    if !line.starts_with('#') { return None; }
+    let level = line.chars().take_while(|&c| c == '#').count();
+    if level <= 3 && line.chars().nth(level) == Some(' ') {
+        Some(level - 1) // 0-indexed: H1=0, H2=1, H3=2
+    } else {
+        None
+    }
 }
 
 // ── Hashing ───────────────────────────────────────────────────────────────────
@@ -230,6 +251,50 @@ pub fn list_file_paths(conn: &Connection) -> Result<Vec<String>> {
     Ok(paths)
 }
 
+// ── Conversation history ──────────────────────────────────────────────────────
+
+pub fn insert_turn(
+    conn: &Connection,
+    session_id: &str,
+    turn_index: usize,
+    role: &str,
+    content: &str,
+    response_id: Option<&str>,
+) -> Result<()> {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs_f64();
+    conn.execute(
+        "INSERT INTO conversations (session_id, turn_index, role, content, response_id, ts)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![session_id, turn_index as i64, role, content, response_id, ts],
+    )?;
+    Ok(())
+}
+
+/// Returns the response_id of the most recent assistant turn, for previous_response_id chaining.
+pub fn last_response_id(conn: &Connection) -> Result<Option<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT response_id FROM conversations
+         WHERE role = 'assistant' AND response_id IS NOT NULL
+         ORDER BY ts DESC LIMIT 1",
+    )?;
+    let mut rows = stmt.query([])?;
+    Ok(rows.next()?.and_then(|r| r.get(0).ok()))
+}
+
+/// Load all prior turns in chronological order, ready to use as history.
+pub fn load_recent_turns(conn: &Connection) -> Result<Vec<(String, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT role, content FROM conversations
+         ORDER BY ts ASC, turn_index ASC",
+    )?;
+    let turns = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(turns)
+}
+
 // ── Search ────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -239,7 +304,8 @@ pub struct SearchRow {
     pub start_line: usize,
     pub end_line: usize,
     pub text: String,
-    pub score: f32,
+    pub score: f32,       // decayed score — used for ranking
+    pub raw_score: f32,   // pre-decay score — used for threshold filtering
     pub vector_score: Option<f32>,
     pub text_score: Option<f32>,
 }
@@ -261,15 +327,17 @@ pub fn search_keyword(conn: &Connection, query: &str, limit: usize) -> Result<Ve
     let rows = stmt
         .query_map(params![fts_query, limit as i64], |r| {
             let rank: f64 = r.get(5)?;
+            let s = bm25_to_score(rank) as f32;
             Ok(SearchRow {
                 id: r.get(0)?,
                 path: r.get(1)?,
                 start_line: r.get::<_, i64>(2)? as usize,
                 end_line: r.get::<_, i64>(3)? as usize,
                 text: r.get(4)?,
-                score: bm25_to_score(rank) as f32,
+                score: s,
+                raw_score: s,
                 vector_score: None,
-                text_score: Some(bm25_to_score(rank) as f32),
+                text_score: Some(s),
             })
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -307,6 +375,7 @@ pub fn search_vector(
                 end_line: r.get::<_, i64>(3)? as usize,
                 text: r.get(4)?,
                 score: cos_sim,
+                raw_score: cos_sim,
                 vector_score: Some(cos_sim),
                 text_score: None,
             })
@@ -322,6 +391,7 @@ pub fn search_vector(
             for row in &mut rows {
                 let norm = (row.score - min) / range;
                 row.score = norm;
+                row.raw_score = norm;
                 row.vector_score = Some(norm);
             }
         }
@@ -364,6 +434,7 @@ pub fn search_hybrid(
         .into_values()
         .map(|(combined, vs, ts, mut row)| {
             row.score = combined;
+            row.raw_score = combined;
             row.vector_score = vs;
             row.text_score = ts;
             row

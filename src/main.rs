@@ -56,8 +56,6 @@ async fn cmd_index<L: LLM>(cfg: &config::Config, llm: &L, force: bool) -> Result
     let mut mem = Memory::open(
         &cfg.workspace,
         &cfg.embed_model,
-        cfg.chunk_tokens,
-        cfg.chunk_overlap,
         cfg.decay_half_life_days,
         cfg.semantic_weight,
         cfg.lexical_weight,
@@ -70,8 +68,6 @@ async fn cmd_index<L: LLM>(cfg: &config::Config, llm: &L, force: bool) -> Result
             mem = Memory::open(
                 &cfg.workspace,
                 &cfg.embed_model,
-                cfg.chunk_tokens,
-                cfg.chunk_overlap,
                 cfg.decay_half_life_days,
                 cfg.semantic_weight,
                 cfg.lexical_weight,
@@ -99,8 +95,6 @@ async fn cmd_search<L: LLM>(
     let mem = Memory::open(
         &cfg.workspace,
         &cfg.embed_model,
-        cfg.chunk_tokens,
-        cfg.chunk_overlap,
         cfg.decay_half_life_days,
         cfg.semantic_weight,
         cfg.lexical_weight,
@@ -163,8 +157,6 @@ async fn cmd_chat<E: LLM>(
     let mem = Memory::open(
         &cfg.workspace,
         &cfg.embed_model,
-        cfg.chunk_tokens,
-        cfg.chunk_overlap,
         cfg.decay_half_life_days,
         cfg.semantic_weight,
         cfg.lexical_weight,
@@ -172,7 +164,23 @@ async fn cmd_chat<E: LLM>(
 
     let context_md = crate::memory::load_context_md(&cfg.workspace);
 
-    let mut history: Vec<Message> = vec![];
+    let session_id = uuid::Uuid::new_v4().to_string();
+
+    // Load prior history and last response ID for stateful chaining
+    let mut history: Vec<Message> = mem.load_recent_turns()?
+        .into_iter()
+        .map(|(role, content)| Message {
+            role: match role.as_str() {
+                "assistant" => Role::Assistant,
+                "system"    => Role::System,
+                _           => Role::User,
+            },
+            content,
+        })
+        .collect();
+
+    let mut previous_response_id: Option<String> = mem.last_response_id()?;
+    let mut turn_index = 0usize;
     let mut rl = rustyline::DefaultEditor::new()?;
 
     println!("Chat ready. Ctrl-D to exit.");
@@ -206,28 +214,37 @@ async fn cmd_chat<E: LLM>(
         }
 
         let system = build_system_prompt(&chunks, context_md.as_deref());
-        let mut messages = vec![Message { role: Role::System, content: system.clone() }];
+        let mut messages = vec![Message { role: Role::System, content: system }];
         messages.extend_from_slice(&history);
         messages.push(Message { role: Role::User, content: input.clone() });
 
         if cfg.debug {
-            eprintln!("[debug] full prompt ({} messages):", messages.len());
+            eprintln!("[debug] full prompt ({} messages), prev_id={:?}", messages.len(), previous_response_id);
             for m in &messages {
                 eprintln!("[debug] [{:?}] {}", m.role, m.content.chars().take(300).collect::<String>());
             }
             eprintln!("[debug] sending to {} at {:.2}s", cfg.chat_model, t0.elapsed().as_secs_f64());
         }
 
-        let response = chat_llm.chat_stream_debug(&messages, cfg.debug).await?;
+        let (response, response_id) = chat_llm.respond(
+            &messages,
+            previous_response_id.as_deref(),
+            cfg.debug,
+        ).await?;
 
         if cfg.debug {
             eprintln!("[debug] turn total: {:.2}s", t0.elapsed().as_secs_f64());
         }
 
-        history.push(Message { role: Role::User, content: input });
+        // Persist both turns; store response_id on assistant turn for chaining
+        mem.insert_turn(&session_id, turn_index,     "user",      &input,     None)?;
+        mem.insert_turn(&session_id, turn_index + 1, "assistant", &response,  Some(&response_id))?;
+        turn_index += 2;
+        previous_response_id = Some(response_id);
+
+        history.push(Message { role: Role::User,      content: input });
         history.push(Message { role: Role::Assistant, content: response });
 
-        trim_history(&mut history, cfg.history_chars);
     }
 
     Ok(())
@@ -252,10 +269,3 @@ fn build_system_prompt(chunks: &[SearchRow], context_md: Option<&str>) -> String
     s
 }
 
-fn trim_history(history: &mut Vec<crate::llm::Message>, char_budget: usize) {
-    while history.iter().map(|m| m.content.len()).sum::<usize>() > char_budget
-        && history.len() >= 2
-    {
-        history.drain(0..2);
-    }
-}

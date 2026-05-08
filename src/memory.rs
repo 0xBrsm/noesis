@@ -4,7 +4,7 @@ use rusqlite::Connection;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
-use crate::db::{self, Chunk, SearchRow};
+use crate::db::{self, SearchRow};
 use crate::llm::{LLM, Reranker};
 
 const FLUSH_SYSTEM_PROMPT: &str = "\
@@ -18,8 +18,6 @@ pub struct Memory {
     conn: Connection,
     workspace: PathBuf,
     model: String,
-    chunk_tokens: usize,
-    chunk_overlap: usize,
     vector_weight: f32,
     text_weight: f32,
     vec_available: bool,
@@ -30,8 +28,6 @@ impl Memory {
     pub fn open(
         workspace: &Path,
         model: &str,
-        chunk_tokens: usize,
-        chunk_overlap: usize,
         decay_half_life_days: f32,
         semantic_weight: f32,
         lexical_weight: f32,
@@ -44,8 +40,6 @@ impl Memory {
             conn,
             workspace: workspace.to_path_buf(),
             model: model.to_string(),
-            chunk_tokens,
-            chunk_overlap,
             vector_weight: semantic_weight,
             text_weight: lexical_weight,
             vec_available,
@@ -129,15 +123,21 @@ impl Memory {
 
         db::delete_chunks(&self.conn, rel)?;
 
-        let chunks = db::chunk_markdown(content, self.chunk_tokens, self.chunk_overlap);
+        let chunks = db::chunk_markdown(content);
         let mut first_vec_dims: Option<usize> = None;
 
         for chunk in &chunks {
             let text_hash = db::sha256(&chunk.text);
             let id = db::chunk_id(rel, chunk.start_line, chunk.end_line, &text_hash);
 
+            let embed_input = if chunk.context.is_empty() {
+                chunk.text.clone()
+            } else {
+                format!("{}\n\n{}", chunk.context, chunk.text)
+            };
+
             let embedding = if self.vec_available {
-                match llm.embed(&chunk.text).await {
+                match llm.embed(&embed_input).await {
                     Ok(v) => {
                         if first_vec_dims.is_none() {
                             first_vec_dims = Some(v.len());
@@ -171,6 +171,20 @@ impl Memory {
         }
 
         Ok(())
+    }
+
+    // ── Conversation history ──────────────────────────────────────────────────
+
+    pub fn insert_turn(&self, session_id: &str, turn_index: usize, role: &str, content: &str, response_id: Option<&str>) -> Result<()> {
+        db::insert_turn(&self.conn, session_id, turn_index, role, content, response_id)
+    }
+
+    pub fn load_recent_turns(&self) -> Result<Vec<(String, String)>> {
+        db::load_recent_turns(&self.conn)
+    }
+
+    pub fn last_response_id(&self) -> Result<Option<String>> {
+        db::last_response_id(&self.conn)
     }
 
     // ── Search ────────────────────────────────────────────────────────────────
@@ -214,6 +228,7 @@ impl Memory {
 
         let now_days = now_unix_days();
         for r in &mut results {
+            r.raw_score = r.score;
             r.score *= decay_multiplier(&r.path, now_days, self.decay_half_life_days);
         }
         results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
@@ -231,7 +246,7 @@ impl Memory {
         threshold: f32,
     ) -> Result<Vec<db::SearchRow>> {
         let results = self.search(query, candidates, llm, reranker).await?;
-        Ok(results.into_iter().filter(|r| r.score >= threshold).take(max_results).collect())
+        Ok(results.into_iter().filter(|r| r.raw_score >= threshold).take(max_results).collect())
     }
 
     // ── Flush ─────────────────────────────────────────────────────────────────
@@ -303,7 +318,7 @@ fn now_unix_days() -> f32 {
         / 86400.0
 }
 
-fn decay_multiplier(path: &str, now_days: f32, half_life: f32) -> f32 {
+fn decay_multiplier(path: &str, _now_days: f32, half_life: f32) -> f32 {
     let filename = std::path::Path::new(path)
         .file_name()
         .and_then(|n| n.to_str())

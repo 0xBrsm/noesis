@@ -14,10 +14,6 @@ pub struct Config {
     // Workspace
     pub workspace: PathBuf,
 
-    // Indexing
-    pub chunk_tokens: usize,
-    pub chunk_overlap: usize,
-
     // Search (noesis search command — results shown to user)
     pub search_results: usize,
     pub semantic_weight: f32,
@@ -29,7 +25,6 @@ pub struct Config {
     pub retrieval_threshold: f32,     // min score after reranking to include
 
     // Chat
-    pub history_chars: usize,
     pub flush_every: usize,
 
     // Memory
@@ -47,15 +42,12 @@ impl Default for Config {
             chat_model: "llama3.2".to_string(),
             embed_model: "nomic-embed-text".to_string(),
             workspace: PathBuf::from(home).join(".noesis"),
-            chunk_tokens: 400,
-            chunk_overlap: 80,
             search_results: 5,
             semantic_weight: 0.7,
             lexical_weight: 0.3,
             retrieval_candidates: 10,
             retrieval_limit: 3,
             retrieval_threshold: 0.5,
-            history_chars: 16_000,
             flush_every: 10,
             decay_half_life_days: 30.0,
             debug: false,
@@ -70,15 +62,12 @@ struct TomlConfig {
     chat_model: Option<String>,
     embed_model: Option<String>,
     workspace: Option<PathBuf>,
-    chunk_tokens: Option<usize>,
-    chunk_overlap: Option<usize>,
     search_results: Option<usize>,
     semantic_weight: Option<f32>,
     lexical_weight: Option<f32>,
     retrieval_candidates: Option<usize>,
     retrieval_limit: Option<usize>,
     retrieval_threshold: Option<f32>,
-    history_chars: Option<usize>,
     flush_every: Option<usize>,
     decay_half_life_days: Option<f32>,
 }
@@ -176,15 +165,12 @@ pub fn load(cli: &Cli) -> Result<Config> {
             if let Some(v) = toml.chat_model           { cfg.chat_model           = v; }
             if let Some(v) = toml.embed_model          { cfg.embed_model          = v; }
             if let Some(v) = toml.workspace            { cfg.workspace            = v; }
-            if let Some(v) = toml.chunk_tokens         { cfg.chunk_tokens         = v; }
-            if let Some(v) = toml.chunk_overlap        { cfg.chunk_overlap        = v; }
             if let Some(v) = toml.search_results       { cfg.search_results       = v; }
             if let Some(v) = toml.semantic_weight      { cfg.semantic_weight      = v; }
             if let Some(v) = toml.lexical_weight       { cfg.lexical_weight       = v; }
             if let Some(v) = toml.retrieval_candidates { cfg.retrieval_candidates = v; }
             if let Some(v) = toml.retrieval_limit      { cfg.retrieval_limit      = v; }
             if let Some(v) = toml.retrieval_threshold  { cfg.retrieval_threshold  = v; }
-            if let Some(v) = toml.history_chars        { cfg.history_chars        = v; }
             if let Some(v) = toml.flush_every          { cfg.flush_every          = v; }
             if let Some(v) = toml.decay_half_life_days { cfg.decay_half_life_days = v; }
         }
@@ -205,7 +191,7 @@ pub fn load(cli: &Cli) -> Result<Config> {
                 cfg.base_url = "https://api.openai.com/v1".to_string();
             }
             if cfg.chat_model == "llama3.2" {
-                cfg.chat_model = "gpt-5-mini".to_string();
+                cfg.chat_model = "gpt-5".to_string();
             }
         }
     }

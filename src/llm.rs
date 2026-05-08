@@ -3,15 +3,15 @@ use async_openai::{
     Client,
     config::OpenAIConfig,
     types::{
-        ChatCompletionRequestMessage, CreateChatCompletionRequestArgs,
         CreateEmbeddingRequestArgs,
+        responses::{CreateResponse, Input, InputContent, InputItem, InputMessage,
+                    InputMessageType, OutputContent, Role as ResponseRole},
     },
 };
 use fastembed::{
     EmbeddingModel, InitOptionsWithLength, OnnxSource, RerankInitOptionsUserDefined,
     TextEmbedding, TextRerank, TokenizerFiles, UserDefinedRerankingModel,
 };
-use futures::StreamExt;
 use std::future::Future;
 use std::io::Write;
 use std::sync::Arc;
@@ -29,33 +29,6 @@ pub enum Role {
     System,
     User,
     Assistant,
-}
-
-impl From<&Message> for ChatCompletionRequestMessage {
-    fn from(m: &Message) -> Self {
-        use async_openai::types::{
-            ChatCompletionRequestAssistantMessageArgs,
-            ChatCompletionRequestSystemMessageArgs,
-            ChatCompletionRequestUserMessageArgs,
-        };
-        match m.role {
-            Role::System => ChatCompletionRequestSystemMessageArgs::default()
-                .content(m.content.clone())
-                .build()
-                .unwrap()
-                .into(),
-            Role::User => ChatCompletionRequestUserMessageArgs::default()
-                .content(m.content.clone())
-                .build()
-                .unwrap()
-                .into(),
-            Role::Assistant => ChatCompletionRequestAssistantMessageArgs::default()
-                .content(m.content.clone())
-                .build()
-                .unwrap()
-                .into(),
-        }
-    }
 }
 
 // ── LLM trait ─────────────────────────────────────────────────────────────────
@@ -86,69 +59,104 @@ impl RemoteLLM {
         }
     }
 
-    pub async fn chat_stream_debug(&self, messages: &[Message], debug: bool) -> Result<String> {
-        let msgs: Vec<ChatCompletionRequestMessage> =
-            messages.iter().map(|m| m.into()).collect();
+    /// Send via Responses API. Returns (text, response_id).
+    /// `previous_response_id` chains multi-turn on stateful servers.
+    /// `system` is sent as instructions; remaining messages as input items.
+    pub async fn respond(
+        &self,
+        messages: &[Message],
+        previous_response_id: Option<&str>,
+        debug: bool,
+    ) -> Result<(String, String)> {
+        // Split system message out as instructions
+        let (instructions, turns) = match messages.first() {
+            Some(m) if matches!(m.role, Role::System) => {
+                (Some(m.content.clone()), &messages[1..])
+            }
+            _ => (None, messages),
+        };
 
-        let request = CreateChatCompletionRequestArgs::default()
-            .model(&self.chat_model)
-            .messages(msgs)
-            .stream(true)
-            .build()?;
+        let input = if previous_response_id.is_some() {
+            // Stateful: only send the latest user message
+            let last = turns.last()
+                .filter(|m| matches!(m.role, Role::User))
+                .map(|m| m.content.clone())
+                .unwrap_or_default();
+            Input::Text(last)
+        } else {
+            // Stateless: send full history as structured input items
+            let items: Vec<InputItem> = turns.iter().map(|m| {
+                let role = match m.role {
+                    Role::User      => ResponseRole::User,
+                    Role::Assistant => ResponseRole::Assistant,
+                    Role::System    => ResponseRole::System,
+                };
+                InputItem::Message(InputMessage {
+                    kind: InputMessageType::Message,
+                    role,
+                    content: InputContent::TextInput(m.content.clone()),
+                })
+            }).collect();
+            Input::Items(items)
+        };
+
+        let request = CreateResponse {
+            model: self.chat_model.clone(),
+            input,
+            instructions,
+            previous_response_id: previous_response_id.map(str::to_string),
+            store: Some(previous_response_id.is_some()),
+            ..Default::default()
+        };
 
         if debug {
             if let Ok(json) = serde_json::to_string_pretty(&request) {
-                eprintln!("[debug] API request JSON:\n{json}");
+                eprintln!("[debug] Responses API request:\n{json}");
             }
         }
 
         let t0 = std::time::Instant::now();
-        let mut stream = self.client.chat().create_stream(request).await?;
-        let mut full = String::new();
-        let mut first_token = true;
+        let response = self.client.responses().create(request).await?;
 
-        while let Some(chunk) = stream.next().await {
-            for choice in chunk?.choices {
-                if let Some(content) = choice.delta.content {
-                    if first_token {
-                        if debug {
-                            eprintln!("[debug] TTFT: {:.2}s", t0.elapsed().as_secs_f64());
-                        }
-                        first_token = false;
+        let text = response.output.iter().find_map(|o| {
+            if let OutputContent::Message(msg) = o {
+                msg.content.iter().find_map(|c| {
+                    if let async_openai::types::responses::Content::OutputText(t) = c {
+                        Some(t.text.clone())
+                    } else {
+                        None
                     }
-                    print!("{content}");
-                    std::io::stdout().flush()?;
-                    full.push_str(&content);
-                }
+                })
+            } else {
+                None
             }
-        }
-        println!();
+        }).unwrap_or_default();
+
         if debug {
-            eprintln!("[debug] total stream: {:.2}s  words≈{}", t0.elapsed().as_secs_f64(), full.split_whitespace().count());
+            eprintln!("[debug] response in {:.2}s  words≈{}  id={}",
+                t0.elapsed().as_secs_f64(),
+                text.split_whitespace().count(),
+                response.id,
+            );
         }
-        Ok(full)
+
+        print!("{text}");
+        println!();
+        std::io::stdout().flush()?;
+
+        Ok((text, response.id))
     }
 }
 
 impl LLM for RemoteLLM {
     async fn chat_stream(&self, messages: &[Message]) -> Result<String> {
-        self.chat_stream_debug(messages, false).await
+        let (text, _) = self.respond(messages, None, false).await?;
+        Ok(text)
     }
 
     async fn chat(&self, messages: &[Message]) -> Result<String> {
-        let msgs: Vec<ChatCompletionRequestMessage> =
-            messages.iter().map(|m| m.into()).collect();
-        let request = CreateChatCompletionRequestArgs::default()
-            .model(&self.chat_model)
-            .messages(msgs)
-            .build()?;
-        let response = self.client.chat().create(request).await?;
-        Ok(response
-            .choices
-            .into_iter()
-            .next()
-            .and_then(|c| c.message.content)
-            .unwrap_or_default())
+        let (text, _) = self.respond(messages, None, false).await?;
+        Ok(text)
     }
 
     async fn embed(&self, text: &str) -> Result<Vec<f32>> {
