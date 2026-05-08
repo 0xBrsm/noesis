@@ -12,6 +12,7 @@ noesis-memory = { workspace = true }
 
 # Async runtime
 tokio = { workspace = true }
+tokio-stream = { workspace = true }
 futures = { workspace = true }
 
 # HTTP server + client
@@ -35,3 +36,6 @@ anyhow = { workspace = true }
 # Logging
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+# Utilities
+uuid = { workspace = true }

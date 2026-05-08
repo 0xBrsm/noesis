@@ -52,13 +52,15 @@ impl Memory {
     // ── Index ─────────────────────────────────────────────────────────────────
 
     pub async fn index<L: LLM>(&mut self, llm: &L) -> Result<IndexResult> {
-        let memory_dir = self.workspace.join("memory");
-        if !memory_dir.exists() {
-            std::fs::create_dir_all(&memory_dir)?;
-            return Ok(IndexResult::default());
+        // Scan journal/ (dated entries, decay) and topics/ (evergreens, no decay).
+        let mut files = Vec::new();
+        for sub in &["journal", "topics"] {
+            let dir = self.workspace.join(sub);
+            if !dir.exists() {
+                std::fs::create_dir_all(&dir)?;
+            }
+            files.extend(collect_md_files(&dir));
         }
-
-        let files = collect_md_files(&memory_dir);
         let stored_paths: std::collections::HashSet<String> =
             db::list_file_paths(&self.conn)?.into_iter().collect();
 
@@ -199,19 +201,26 @@ impl Memory {
         db::search_keyword(&self.conn, query, limit)
     }
 
-    pub async fn search<L: LLM>(
+    /// True if a vec0 table exists in the DB; caller should compute an embedding
+    /// before invoking [`Memory::search_with_vec`] when this is true.
+    pub fn vec_available(&self) -> bool {
+        self.vec_available
+    }
+
+    /// Synchronous search with a caller-supplied query embedding. Embedding
+    /// happens outside Memory so the caller can drop any locks before awaiting.
+    pub fn search_with_vec(
         &self,
         query: &str,
+        query_vec: Option<&[f32]>,
         limit: usize,
-        llm: &L,
         reranker: Option<&Reranker>,
     ) -> Result<Vec<SearchRow>> {
-        let mut results = if self.vec_available {
-            let query_vec = llm.embed(query).await?;
+        let mut results = if let Some(qv) = query_vec {
             db::search_hybrid(
                 &self.conn,
                 query,
-                &query_vec,
+                qv,
                 limit,
                 self.vector_weight,
                 self.text_weight,
@@ -225,11 +234,14 @@ impl Memory {
             let mut scored = rr.rerank(query, &docs)?;
             scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
             let old = results;
-            results = scored.into_iter().map(|(i, score)| {
-                let mut row = old[i].clone();
-                row.score = score;
-                row
-            }).collect();
+            results = scored
+                .into_iter()
+                .map(|(i, score)| {
+                    let mut row = old[i].clone();
+                    row.score = score;
+                    row
+                })
+                .collect();
         }
 
         let now_days = now_unix_days();
@@ -242,17 +254,21 @@ impl Memory {
         Ok(results)
     }
 
-    pub async fn search_for_context<L: LLM>(
+    pub fn search_for_context_with_vec(
         &self,
         query: &str,
-        llm: &L,
+        query_vec: Option<&[f32]>,
         reranker: Option<&Reranker>,
         candidates: usize,
         max_results: usize,
         threshold: f32,
     ) -> Result<Vec<db::SearchRow>> {
-        let results = self.search(query, candidates, llm, reranker).await?;
-        Ok(results.into_iter().filter(|r| r.raw_score >= threshold).take(max_results).collect())
+        let results = self.search_with_vec(query, query_vec, candidates, reranker)?;
+        Ok(results
+            .into_iter()
+            .filter(|r| r.raw_score >= threshold)
+            .take(max_results)
+            .collect())
     }
 
     // ── Dream extraction ──────────────────────────────────────────────────────
