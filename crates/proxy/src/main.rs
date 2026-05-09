@@ -26,6 +26,7 @@ use noesis_memory::{
 use reqwest::Client;
 use serde_json::{Value, json};
 use std::{
+    collections::HashSet,
     path::PathBuf,
     sync::{
         Arc,
@@ -63,6 +64,10 @@ struct AppState {
     /// last forwarded turn. Used to populate `previous_response_id` on the
     /// next request so OpenAI holds the conversation server-side.
     last_response_id: Mutex<Option<String>>,
+    /// Chunk ids already injected on this chain. We don't re-inject them
+    /// because OpenAI is holding them in server-side history. Resets on
+    /// proxy restart (which is also when the chain resets).
+    seen_chunk_ids: Mutex<HashSet<String>>,
     session_id: String,
     next_turn: AtomicUsize,
 }
@@ -153,6 +158,7 @@ async fn main() -> Result<()> {
         cfg,
         context_md,
         last_response_id: Mutex::new(None),
+        seen_chunk_ids: Mutex::new(HashSet::new()),
         session_id: Uuid::new_v4().to_string(),
         next_turn: AtomicUsize::new(0),
     });
@@ -357,14 +363,21 @@ async fn handle_responses(
     let rows = if user_input.trim().is_empty() {
         Vec::new()
     } else {
-        retrieve_context(&state, &user_input).await
+        let raw = retrieve_context(&state, &user_input).await;
+        let mut seen = state.seen_chunk_ids.lock().await;
+        raw.into_iter()
+            .filter(|r| seen.insert(r.id.clone()))
+            .collect()
     };
 
     if let Some(ref ctx) = state.context_md {
         inject_instructions(&mut req, ctx);
     }
     if !rows.is_empty() {
+        tracing::debug!(n = rows.len(), "injecting fresh chunks");
         inject_memory(&mut req, &format_context_block(&rows));
+    } else if !user_input.trim().is_empty() {
+        tracing::debug!("no fresh chunks to inject");
     }
 
     let body = match serde_json::to_vec(&req) {
