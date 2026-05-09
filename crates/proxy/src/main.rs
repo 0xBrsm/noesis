@@ -59,6 +59,10 @@ struct AppState {
     /// Contents of `<data_dir>/context.md`, if present. Sent on every request
     /// as `instructions` so it shares the upstream prompt cache slot.
     context_md: Option<String>,
+    /// Proxy-managed Responses API chain: the upstream response_id from the
+    /// last forwarded turn. Used to populate `previous_response_id` on the
+    /// next request so OpenAI holds the conversation server-side.
+    last_response_id: Mutex<Option<String>>,
     session_id: String,
     next_turn: AtomicUsize,
 }
@@ -148,6 +152,7 @@ async fn main() -> Result<()> {
         journaler,
         cfg,
         context_md,
+        last_response_id: Mutex::new(None),
         session_id: Uuid::new_v4().to_string(),
         next_turn: AtomicUsize::new(0),
     });
@@ -332,10 +337,21 @@ async fn handle_responses(
     let mut req: Value = serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
     let is_stream = req.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
     let user_input = extract_input_text(&req);
-    let prev_id = req
-        .get("previous_response_id")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
+
+    // Force stateful chaining: OpenAI holds history, we send only the newest
+    // user turn plus a proxy-managed `previous_response_id`. Any history or
+    // `previous_response_id` the client supplied is discarded.
+    req["store"] = json!(true);
+    if !user_input.is_empty() {
+        req["input"] = Value::Array(vec![json!({ "role": "user", "content": user_input.clone() })]);
+    }
+    let prev_id = state.last_response_id.lock().await.clone();
+    match prev_id {
+        Some(ref pid) => req["previous_response_id"] = Value::String(pid.clone()),
+        None => {
+            req.as_object_mut().map(|m| m.remove("previous_response_id"));
+        }
+    }
 
     // Retrieval + injection (best-effort; failures don't block the request).
     let rows = if user_input.trim().is_empty() {
@@ -344,26 +360,19 @@ async fn handle_responses(
         retrieve_context(&state, &user_input).await
     };
 
-    let mut mutated = false;
     if let Some(ref ctx) = state.context_md {
         inject_instructions(&mut req, ctx);
-        mutated = true;
     }
     if !rows.is_empty() {
         inject_memory(&mut req, &format_context_block(&rows));
-        mutated = true;
     }
 
-    let body = if mutated {
-        match serde_json::to_vec(&req) {
-            Ok(v) => Bytes::from(v),
-            Err(e) => {
-                tracing::warn!("reserialize request: {e}");
-                body
-            }
+    let body = match serde_json::to_vec(&req) {
+        Ok(v) => Bytes::from(v),
+        Err(e) => {
+            tracing::warn!("reserialize request: {e}");
+            body
         }
-    } else {
-        body
     };
 
     let url = format!("{}/v1/responses", state.upstream.trim_end_matches('/'));
@@ -390,8 +399,7 @@ async fn handle_responses(
 
     if is_stream {
         let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(64);
-        let memory = state.memory.clone();
-        let session_id = state.session_id.clone();
+        let state_for_task = state.clone();
         let user_idx = state.next_turn.fetch_add(2, Ordering::SeqCst);
 
         tokio::spawn(async move {
@@ -423,9 +431,13 @@ async fn handle_responses(
                 parse_sse_event(&buf, &mut assistant_text, &mut response_id);
             }
 
+            if let Some(ref id) = response_id {
+                *state_for_task.last_response_id.lock().await = Some(id.clone());
+            }
+
             persist_turns(
-                &memory,
-                &session_id,
+                &state_for_task.memory,
+                &state_for_task.session_id,
                 user_idx,
                 &user_input,
                 prev_id.as_deref(),
@@ -449,6 +461,9 @@ async fn handle_responses(
                 .get("id")
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
+            if let Some(ref id) = resp_id {
+                *state.last_response_id.lock().await = Some(id.clone());
+            }
             let assistant_text = extract_assistant_text(&resp_json);
             let user_idx = state.next_turn.fetch_add(2, Ordering::SeqCst);
             persist_turns(
