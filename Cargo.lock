@@ -1980,11 +1980,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-openai",
- "async-trait",
  "chrono",
- "clap",
  "fastembed",
- "futures",
  "hex",
  "hf-hub",
  "rusqlite",
@@ -1995,7 +1992,6 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
- "uuid",
  "walkdir",
 ]
 

@@ -1,0 +1,49 @@
+# noesis config — copy to ~/.noesis/config.toml and edit.
+# Every field below is required; there are no in-code defaults.
+
+# ── Server ──────────────────────────────────────────────────────────────────
+# Address the proxy listens on for OpenAI-compatible Responses API traffic.
+bind = "127.0.0.1:8787"
+
+# Upstream that the proxy forwards `/v1/responses` to. Path is appended by the
+# proxy, so give the host root (no `/v1`).
+upstream = "https://api.openai.com"
+
+# ── LLM ─────────────────────────────────────────────────────────────────────
+# Base URL the memory crate's own LLM calls use (background dream/journal +
+# embeddings when not using the local embedder). OpenAI-compatible — include
+# `/v1`. Often the same host as `upstream` plus `/v1`.
+base_url = "https://api.openai.com/v1"
+api_key = "sk-REPLACE_ME"
+
+chat_model = "gpt-5"
+embed_model = "text-embedding-3-small"
+rerank_model = "Xenova/ms-marco-MiniLM-L-6-v2"
+
+# Use a local fastembed model for embeddings instead of the remote API.
+# When true, `embed_model` is unused and `local_embed_model` is loaded.
+local_embed = false
+local_embed_model = "Xenova/all-MiniLM-L6-v2"
+
+# ── Paths ───────────────────────────────────────────────────────────────────
+# `~/...` expands against $HOME.
+workspace = "~/noesis"   # journal/, topics/, context.md
+data_dir  = "~/.noesis"  # memory.db, cached models, state files
+
+# ── Search ──────────────────────────────────────────────────────────────────
+# Weights for hybrid (semantic + lexical) merge. Should sum to ~1.0.
+semantic_weight = 0.7
+lexical_weight  = 0.3
+
+# ── Retrieval (memory injection on each request) ────────────────────────────
+# How many candidate chunks to fetch before reranking.
+retrieval_candidates = 10
+# Max chunks to inject into the request after reranking + threshold.
+retrieval_limit = 3
+# Minimum raw (pre-decay) score for a chunk to be eligible for injection.
+retrieval_threshold = 0.5
+
+# ── Memory decay ────────────────────────────────────────────────────────────
+# Half-life in days for dated journal entries. Older entries are exponentially
+# downweighted at retrieval time. Evergreen topic files do not decay.
+decay_half_life_days = 30.0

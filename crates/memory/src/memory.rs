@@ -1,18 +1,11 @@
 use anyhow::{Context, Result};
-use chrono::{Datelike, Local};
+use chrono::Datelike;
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 use crate::db::{self, SearchRow};
 use crate::llm::{LLM, Reranker};
-
-const EXTRACT_PROMPT: &str = "\
-You are extracting durable facts from a conversation to store in long-term memory.
-Write only facts worth keeping across future sessions: decisions made, preferences \
-expressed, important context, things the user wants to be remembered.
-Be concise. Use short bullet points. Omit small talk and transient details.
-If there is nothing worth storing, reply with exactly: @@SILENT@@";
 
 pub struct Memory {
     conn: Connection,
@@ -187,6 +180,10 @@ impl Memory {
         db::load_recent_turns(&self.conn)
     }
 
+    pub fn load_turns_since(&self, since_ts: f64) -> Result<Vec<(String, String, f64)>> {
+        db::load_turns_since(&self.conn, since_ts)
+    }
+
     pub fn last_response_id(&self) -> Result<Option<String>> {
         db::last_response_id(&self.conn)
     }
@@ -271,63 +268,6 @@ impl Memory {
             .collect())
     }
 
-    // ── Dream extraction ──────────────────────────────────────────────────────
-
-    /// Extract durable facts from `turns` (recent conversation) and append to
-    /// today's dated memory file, then re-index it. Called by the dream trigger.
-    pub async fn extract_to_memory<L: LLM>(
-        &mut self,
-        turns: &[(String, String)],
-        llm: &L,
-    ) -> Result<Option<String>> {
-        use crate::llm::{Message, Role};
-
-        let mut messages = vec![Message {
-            role: Role::System,
-            content: EXTRACT_PROMPT.to_string(),
-        }];
-        for (role, content) in turns {
-            let r = match role.as_str() {
-                "assistant" => Role::Assistant,
-                _ => Role::User,
-            };
-            messages.push(Message { role: r, content: content.clone() });
-        }
-
-        let response = llm.chat(&messages).await?;
-        let extracted = response.trim().to_string();
-
-        if extracted.is_empty() || extracted.contains("@@SILENT@@") {
-            return Ok(None);
-        }
-
-        let memory_dir = self.workspace.join("memory");
-        std::fs::create_dir_all(&memory_dir)?;
-
-        let today = Local::now().format("%Y-%m-%d").to_string();
-        let dated_file = memory_dir.join(format!("{today}.md"));
-
-        if dated_file.exists() {
-            let existing = std::fs::read_to_string(&dated_file)?;
-            let sep = if existing.ends_with("\n\n") { "" } else { "\n\n" };
-            std::fs::write(&dated_file, format!("{existing}{sep}{extracted}\n"))?;
-        } else {
-            std::fs::write(&dated_file, format!("{extracted}\n"))?;
-        }
-
-        let content = std::fs::read_to_string(&dated_file)?;
-        let hash = db::sha256(&content);
-        let meta = dated_file.metadata()?;
-        let mtime = meta
-            .modified()?
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_secs_f64();
-        let rel = rel_path(&dated_file, &self.workspace)?;
-        self.index_file(&rel, &content, &hash, mtime, meta.len(), llm)
-            .await?;
-
-        Ok(Some(extracted))
-    }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

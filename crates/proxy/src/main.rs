@@ -6,7 +6,7 @@
 //! memory chunks (embedding shortlist → optional reranker) and injects them
 //! as a developer-role input item.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use axum::{
     Router,
     body::Body,
@@ -19,17 +19,18 @@ use bytes::Bytes;
 use clap::Parser;
 use futures::StreamExt;
 use noesis_memory::{
-    Config as MemConfig, Embedder, LocalLLM, Memory, RemoteLLM, Reranker, SearchRow, LLM,
+    AutoDream, Config as MemConfig, Embedder, Journaler, LLM, LocalLLM, Memory, Message,
+    RemoteLLM, Reranker, Role, SUMMARIZER_PROMPT, SearchRow, apply_plan, run_consolidation,
 };
 use reqwest::Client;
 use serde_json::{Value, json};
 use std::{
-    net::SocketAddr,
     path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
+    time::Duration,
 };
 use tokio::sync::{Mutex, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
@@ -39,25 +40,10 @@ use uuid::Uuid;
 #[derive(Parser, Debug)]
 #[command(name = "noesis-proxy", about = "OpenAI Responses API proxy with RAG memory injection")]
 struct Cli {
-    /// Address to bind the proxy on.
-    #[arg(long, default_value = "127.0.0.1:8787")]
-    bind: SocketAddr,
-
-    /// Upstream Responses API base URL (e.g. https://api.openai.com).
-    #[arg(long, env = "NOESIS_UPSTREAM", default_value = "https://api.openai.com")]
-    upstream: String,
-
-    /// Workspace dir for journal/topic files (defaults to ~/noesis).
-    #[arg(long, env = "NOESIS_WORKSPACE")]
-    workspace: Option<PathBuf>,
-
-    /// Data dir for db + cached models (defaults to ~/.noesis).
-    #[arg(long, env = "NOESIS_DATA_DIR")]
-    data_dir: Option<PathBuf>,
-
-    /// Use local fastembed embedder instead of remote API.
-    #[arg(long, env = "NOESIS_LOCAL_EMBED")]
-    local_embed: bool,
+    /// Path to config.toml. Defaults to ~/.noesis/config.toml.
+    /// All other settings live in the config file.
+    #[arg(long)]
+    config: Option<PathBuf>,
 }
 
 struct AppState {
@@ -65,7 +51,9 @@ struct AppState {
     http: Client,
     memory: Arc<Mutex<Memory>>,
     embedder: Arc<Embedder>,
+    chat: Arc<RemoteLLM>,
     reranker: Option<Arc<Reranker>>,
+    journaler: Arc<Journaler>,
     cfg: MemConfig,
     session_id: String,
     next_turn: AtomicUsize,
@@ -79,16 +67,11 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    let mut cfg = MemConfig::default();
-    if let Some(ws) = cli.workspace.clone() {
-        cfg.workspace = ws;
-    }
-    if let Some(dd) = cli.data_dir.clone() {
-        cfg.data_dir = dd;
-    }
-    if cli.local_embed {
-        cfg.local_embed = true;
-    }
+    let config_path = cli
+        .config
+        .or_else(MemConfig::default_path)
+        .context("could not resolve config path: $HOME unset and --config not given")?;
+    let cfg = MemConfig::load(&config_path)?;
 
     let model_name = if cfg.local_embed {
         cfg.local_embed_model.as_str()
@@ -126,25 +109,200 @@ async fn main() -> Result<()> {
         }
     };
 
+    let chat = Arc::new(RemoteLLM::new(
+        &cfg.base_url,
+        &cfg.api_key,
+        &cfg.chat_model,
+        &cfg.embed_model,
+    ));
+    let journaler = Arc::new(Journaler::new(&cfg.workspace, &cfg.data_dir));
+
+    let bind = cfg.bind;
+    let upstream = cfg.upstream.clone();
+
     let state = Arc::new(AppState {
-        upstream: cli.upstream.clone(),
+        upstream: upstream.clone(),
         http: Client::new(),
         memory: Arc::new(Mutex::new(memory)),
         embedder: Arc::new(embedder),
+        chat,
         reranker,
+        journaler,
         cfg,
         session_id: Uuid::new_v4().to_string(),
         next_turn: AtomicUsize::new(0),
     });
 
+    spawn_journal_loop(state.clone());
+
     let app = Router::new()
         .route("/v1/responses", post(handle_responses))
         .with_state(state);
 
-    tracing::info!(bind = %cli.bind, upstream = %cli.upstream, "noesis-proxy starting");
-    let listener = tokio::net::TcpListener::bind(cli.bind).await?;
+    tracing::info!(%bind, %upstream, config = %config_path.display(), "noesis-proxy starting");
+    let listener = tokio::net::TcpListener::bind(bind).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+// ── Background journal summarizer ───────────────────────────────────────────
+
+fn spawn_journal_loop(state: Arc<AppState>) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(300));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // Skip the initial immediate tick so we don't hammer at startup.
+        tick.tick().await;
+        loop {
+            tick.tick().await;
+            run_journal_tick(state.clone()).await;
+        }
+    });
+}
+
+async fn run_journal_tick(state: Arc<AppState>) {
+    let st = state.journaler.load_state().await;
+    let last_ts = state.journaler.last_ts(&st);
+
+    let turns = {
+        let mem = state.memory.lock().await;
+        match mem.load_turns_since(last_ts) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!("journal: load turns: {e}");
+                return;
+            }
+        }
+    };
+
+    if !state.journaler.should_run(&st, turns.len()) {
+        return;
+    }
+
+    let excerpt = turns
+        .iter()
+        .map(|(role, content, _ts)| format!("[{role}]: {content}"))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    let messages = vec![
+        Message {
+            role: Role::System,
+            content: SUMMARIZER_PROMPT.to_string(),
+        },
+        Message {
+            role: Role::User,
+            content: excerpt,
+        },
+    ];
+
+    let summary = match state.chat.respond(&messages, None, false).await {
+        Ok((text, _id)) => text,
+        Err(e) => {
+            tracing::warn!("journal: LLM call failed: {e}");
+            return;
+        }
+    };
+
+    let trimmed = summary.trim();
+    if trimmed.is_empty() || trimmed == "SKIP" {
+        if let Err(e) = state.journaler.mark_done().await {
+            tracing::warn!("journal: mark_done after skip: {e}");
+        }
+        return;
+    }
+
+    let path = match state.journaler.append_entry(&summary).await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("journal: append: {e}");
+            return;
+        }
+    };
+
+    {
+        let mut mem = state.memory.lock().await;
+        if let Err(e) = mem.index(state.embedder.as_ref()).await {
+            tracing::warn!("journal: re-index: {e}");
+        }
+    }
+
+    if let Err(e) = state.journaler.mark_done().await {
+        tracing::warn!("journal: mark_done: {e}");
+    }
+
+    tracing::info!(
+        path = %path.display(),
+        turns = turns.len(),
+        "journal entry appended"
+    );
+
+    // Try a dream consolidation; gates inside ensure it only runs when due.
+    tokio::spawn(run_dream_if_due(state));
+}
+
+// ── Background dream consolidation ──────────────────────────────────────────
+
+async fn run_dream_if_due(state: Arc<AppState>) {
+    let auto_dream = AutoDream::new(&state.cfg.data_dir);
+    let dream_state = auto_dream.load_state().await;
+    let last_ts = dream_state.last_as_ts();
+
+    let sessions = {
+        let mem = state.memory.lock().await;
+        match mem.sessions_since(last_ts) {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!("dream: sessions_since: {e}");
+                return;
+            }
+        }
+    };
+
+    match auto_dream.should_run(sessions).await {
+        Ok(true) => {}
+        Ok(false) => return,
+        Err(e) => {
+            tracing::warn!("dream: gate check: {e}");
+            return;
+        }
+    }
+
+    tracing::info!("dream: starting consolidation");
+
+    let plan = match run_consolidation(&state.cfg.workspace, state.chat.as_ref(), last_ts).await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("dream: consolidation failed: {e}");
+            let _ = auto_dream.finish().await;
+            return;
+        }
+    };
+
+    let updates = plan.updates.len();
+    let deletes = plan.deletes.len();
+
+    let changed = match apply_plan(&state.cfg.workspace, &plan).await {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::warn!("dream: apply plan: {e}");
+            let _ = auto_dream.finish().await;
+            return;
+        }
+    };
+
+    if changed > 0 {
+        let mut mem = state.memory.lock().await;
+        if let Err(e) = mem.index(state.embedder.as_ref()).await {
+            tracing::warn!("dream: re-index: {e}");
+        }
+    }
+
+    if let Err(e) = auto_dream.finish().await {
+        tracing::warn!("dream: finish: {e}");
+    }
+
+    tracing::info!(updates, deletes, changed, "dream consolidation done");
 }
 
 async fn handle_responses(

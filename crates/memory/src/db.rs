@@ -303,6 +303,26 @@ pub fn load_recent_turns(conn: &Connection) -> Result<Vec<(String, String)>> {
     Ok(turns)
 }
 
+/// Load turns with `ts > since_ts` in chronological order — used by the
+/// background journal summarizer to grab the delta since its last entry.
+pub fn load_turns_since(conn: &Connection, since_ts: f64) -> Result<Vec<(String, String, f64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT role, content, ts FROM conversations
+         WHERE ts > ?
+         ORDER BY ts ASC, turn_index ASC",
+    )?;
+    let turns = stmt
+        .query_map([since_ts], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, f64>(2)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(turns)
+}
+
 /// Count distinct sessions that have turns after `since_ts` (unix seconds as f64).
 pub fn count_sessions_since(conn: &Connection, since_ts: f64) -> Result<usize> {
     let count: i64 = conn.query_row(
