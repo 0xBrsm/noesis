@@ -20,7 +20,8 @@ use clap::Parser;
 use futures::StreamExt;
 use noesis_memory::{
     AutoDream, Config as MemConfig, Embedder, Journaler, LLM, LocalLLM, Memory, Message,
-    RemoteLLM, Reranker, Role, SUMMARIZER_PROMPT, SearchRow, apply_plan, run_consolidation,
+    RemoteLLM, Reranker, Role, SUMMARIZER_PROMPT, SearchRow, apply_plan, load_context_md,
+    run_consolidation,
 };
 use reqwest::Client;
 use serde_json::{Value, json};
@@ -55,6 +56,9 @@ struct AppState {
     reranker: Option<Arc<Reranker>>,
     journaler: Arc<Journaler>,
     cfg: MemConfig,
+    /// Contents of `<data_dir>/context.md`, if present. Sent on every request
+    /// as `instructions` so it shares the upstream prompt cache slot.
+    context_md: Option<String>,
     session_id: String,
     next_turn: AtomicUsize,
 }
@@ -129,6 +133,11 @@ async fn main() -> Result<()> {
     let bind = cfg.bind;
     let upstream = cfg.upstream.clone();
 
+    let context_md = load_context_md(&cfg.data_dir);
+    if let Some(ref s) = context_md {
+        tracing::info!(bytes = s.len(), "loaded context.md");
+    }
+
     let state = Arc::new(AppState {
         upstream: upstream.clone(),
         http: Client::new(),
@@ -138,6 +147,7 @@ async fn main() -> Result<()> {
         reranker,
         journaler,
         cfg,
+        context_md,
         session_id: Uuid::new_v4().to_string(),
         next_turn: AtomicUsize::new(0),
     });
@@ -328,22 +338,32 @@ async fn handle_responses(
         .map(str::to_string);
 
     // Retrieval + injection (best-effort; failures don't block the request).
-    let body = if user_input.trim().is_empty() {
-        body
+    let rows = if user_input.trim().is_empty() {
+        Vec::new()
     } else {
-        let rows = retrieve_context(&state, &user_input).await;
-        if rows.is_empty() {
-            body
-        } else {
-            inject_memory(&mut req, &format_context_block(&rows));
-            match serde_json::to_vec(&req) {
-                Ok(v) => Bytes::from(v),
-                Err(e) => {
-                    tracing::warn!("reserialize request: {e}");
-                    body
-                }
+        retrieve_context(&state, &user_input).await
+    };
+
+    let mut mutated = false;
+    if let Some(ref ctx) = state.context_md {
+        inject_instructions(&mut req, ctx);
+        mutated = true;
+    }
+    if !rows.is_empty() {
+        inject_memory(&mut req, &format_context_block(&rows));
+        mutated = true;
+    }
+
+    let body = if mutated {
+        match serde_json::to_vec(&req) {
+            Ok(v) => Bytes::from(v),
+            Err(e) => {
+                tracing::warn!("reserialize request: {e}");
+                body
             }
         }
+    } else {
+        body
     };
 
     let url = format!("{}/v1/responses", state.upstream.trim_end_matches('/'));
@@ -545,6 +565,19 @@ fn format_context_block(rows: &[SearchRow]) -> String {
     }
     s.push_str("</retrieved_memory>");
     s
+}
+
+/// Set the top-level `instructions` field to `context.md`. If the client
+/// already supplied `instructions`, prepend ours so both survive — ours sits
+/// in the cacheable system slot regardless.
+fn inject_instructions(req: &mut Value, context_md: &str) {
+    let merged = match req.get("instructions").and_then(|v| v.as_str()) {
+        Some(existing) if !existing.trim().is_empty() => {
+            format!("{}\n\n{}", context_md, existing)
+        }
+        _ => context_md.to_string(),
+    };
+    req["instructions"] = Value::String(merged);
 }
 
 /// Inject memory as a developer-role input item, preceding any existing input.
