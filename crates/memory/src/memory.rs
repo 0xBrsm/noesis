@@ -13,7 +13,6 @@ pub struct Memory {
     model: String,
     vector_weight: f32,
     text_weight: f32,
-    vec_available: bool,
     decay_half_life_days: f32,
 }
 
@@ -28,7 +27,6 @@ impl Memory {
         let db_path = data_dir.join("memory.db");
         let _ = db::register_vec_extension();
         let conn = db::open(&db_path)?;
-        let vec_available = db::vec_table_exists(&conn);
 
         Ok(Self {
             conn,
@@ -36,7 +34,6 @@ impl Memory {
             model: model.to_string(),
             vector_weight: semantic_weight,
             text_weight: lexical_weight,
-            vec_available,
             decay_half_life_days,
         })
     }
@@ -132,22 +129,20 @@ impl Memory {
                 format!("{}\n\n{}", chunk.context, chunk.text)
             };
 
-            let embedding = if self.vec_available {
-                match llm.embed(&embed_input).await {
-                    Ok(v) => {
-                        if first_vec_dims.is_none() {
-                            first_vec_dims = Some(v.len());
-                            db::ensure_vec_table(&self.conn, v.len())?;
+            let embedding = match llm.embed(&embed_input).await {
+                Ok(v) => {
+                    if first_vec_dims.is_none() {
+                        first_vec_dims = Some(v.len());
+                        if let Err(e) = db::ensure_vec_table(&self.conn, v.len()) {
+                            tracing::warn!("ensure_vec_table failed: {e}");
                         }
-                        Some(v)
                     }
-                    Err(e) => {
-                        eprintln!("embed warning: {e}");
-                        None
-                    }
+                    Some(v)
                 }
-            } else {
-                None
+                Err(e) => {
+                    tracing::warn!("embed warning: {e}");
+                    None
+                }
             };
 
             db::upsert_chunk(
@@ -200,7 +195,7 @@ impl Memory {
     /// True if a vec0 table exists in the DB; caller should compute an embedding
     /// before invoking [`Memory::search_with_vec`] when this is true.
     pub fn vec_available(&self) -> bool {
-        self.vec_available
+        db::vec_table_exists(&self.conn)
     }
 
     /// Synchronous search with a caller-supplied query embedding. Embedding

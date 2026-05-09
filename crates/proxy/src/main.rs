@@ -78,7 +78,7 @@ async fn main() -> Result<()> {
     } else {
         cfg.embed_model.as_str()
     };
-    let memory = Memory::open(
+    let mut memory = Memory::open(
         &cfg.data_dir,
         model_name,
         cfg.decay_half_life_days,
@@ -115,6 +115,16 @@ async fn main() -> Result<()> {
         &cfg.embed_model,
     ));
     let journaler = Arc::new(Journaler::new(&cfg.data_dir));
+
+    match memory.index(&embedder).await {
+        Ok(r) => tracing::info!(
+            indexed = r.indexed,
+            skipped = r.skipped,
+            deleted = r.deleted,
+            "startup index complete"
+        ),
+        Err(e) => tracing::warn!("startup index failed: {e}"),
+    }
 
     let bind = cfg.bind;
     let upstream = cfg.upstream.clone();
@@ -340,11 +350,15 @@ async fn handle_responses(
     let mut req_builder = state.http.post(&url);
     for (name, value) in headers.iter() {
         let n = name.as_str();
-        if matches!(n, "host" | "content-length" | "connection" | "accept-encoding") {
+        if matches!(
+            n,
+            "host" | "content-length" | "connection" | "accept-encoding" | "authorization"
+        ) {
             continue;
         }
         req_builder = req_builder.header(name, value);
     }
+    req_builder = req_builder.bearer_auth(&state.cfg.api_key);
 
     let upstream_resp = req_builder.body(body).send().await.map_err(|e| {
         tracing::error!("upstream error: {e}");
