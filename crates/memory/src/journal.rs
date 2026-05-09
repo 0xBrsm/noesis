@@ -70,11 +70,11 @@ pub struct Journaler {
 }
 
 impl Journaler {
-    pub fn new(workspace: &Path, data_dir: &Path) -> Self {
+    pub fn new(data_dir: &Path) -> Self {
         Self {
             config: JournalConfig::default(),
             state_file: data_dir.join(".journal_state.json"),
-            journal_dir: workspace.join("journal"),
+            journal_dir: data_dir.join("journal"),
         }
     }
 

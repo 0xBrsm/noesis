@@ -26,9 +26,9 @@ local_embed = false
 local_embed_model = "Xenova/all-MiniLM-L6-v2"
 
 # ── Paths ───────────────────────────────────────────────────────────────────
-# `~/...` expands against $HOME.
-workspace = "~/noesis"   # journal/, topics/, context.md
-data_dir  = "~/.noesis"  # memory.db, cached models, state files
+# `~/...` expands against $HOME. All noesis state lives in this single
+# directory: memory.db, cached models, journal/, topics/, context.md, state files.
+data_dir = "~/.noesis"
 
 # ── Search ──────────────────────────────────────────────────────────────────
 # Weights for hybrid (semantic + lexical) merge. Should sum to ~1.0.

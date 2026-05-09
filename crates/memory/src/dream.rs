@@ -185,12 +185,12 @@ fn now_secs() -> u64 {
 /// so phases share the upstream prompt cache. Returns the plan; the caller is
 /// responsible for `apply_plan` + re-index.
 pub async fn run_consolidation(
-    workspace: &Path,
+    data_dir: &Path,
     llm: &RemoteLLM,
     last_consolidated_at: f64,
 ) -> Result<ConsolidationPlan> {
-    let topics_dir = workspace.join("topics");
-    let journal_dir = workspace.join("journal");
+    let topics_dir = data_dir.join("topics");
+    let journal_dir = data_dir.join("journal");
     fs::create_dir_all(&topics_dir).await?;
 
     let topic_summaries = list_topic_summaries(&topics_dir).await?;
@@ -276,10 +276,10 @@ pub fn parse_plan(text: &str) -> Result<ConsolidationPlan> {
     Ok(serde_json::from_str(s)?)
 }
 
-/// Apply a consolidation plan to `<workspace>/topics/`. Returns the number of
+/// Apply a consolidation plan to `<data_dir>/topics/`. Returns the number of
 /// files written or removed.
-pub async fn apply_plan(workspace: &Path, plan: &ConsolidationPlan) -> Result<usize> {
-    let topics_dir = workspace.join("topics");
+pub async fn apply_plan(data_dir: &Path, plan: &ConsolidationPlan) -> Result<usize> {
+    let topics_dir = data_dir.join("topics");
     fs::create_dir_all(&topics_dir).await?;
     let mut changed = 0usize;
 

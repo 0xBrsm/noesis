@@ -23,8 +23,8 @@ pub struct Config {
     pub local_embed_model: String,
     pub rerank_model: String,
 
-    // Paths (`~/...` is expanded against $HOME)
-    pub workspace: PathBuf,
+    // Path (`~/...` is expanded against $HOME). All noesis state lives here:
+    // memory.db, models/, journal/, topics/, context.md, .consolidation_*, etc.
     pub data_dir: PathBuf,
 
     // Search
@@ -62,7 +62,6 @@ impl Config {
 }
 
 fn expand_paths(mut cfg: Config) -> Config {
-    cfg.workspace = expand_tilde(cfg.workspace);
     cfg.data_dir = expand_tilde(cfg.data_dir);
     cfg
 }

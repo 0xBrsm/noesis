@@ -9,7 +9,7 @@ use crate::llm::{LLM, Reranker};
 
 pub struct Memory {
     conn: Connection,
-    workspace: PathBuf,  // ~/noesis — user files (memory/, context.md)
+    data_dir: PathBuf,  // ~/.noesis — everything (db, models, journal/, topics/, ...)
     model: String,
     vector_weight: f32,
     text_weight: f32,
@@ -19,7 +19,6 @@ pub struct Memory {
 
 impl Memory {
     pub fn open(
-        workspace: &Path,
         data_dir: &Path,
         model: &str,
         decay_half_life_days: f32,
@@ -33,7 +32,7 @@ impl Memory {
 
         Ok(Self {
             conn,
-            workspace: workspace.to_path_buf(),
+            data_dir: data_dir.to_path_buf(),
             model: model.to_string(),
             vector_weight: semantic_weight,
             text_weight: lexical_weight,
@@ -48,7 +47,7 @@ impl Memory {
         // Scan journal/ (dated entries, decay) and topics/ (evergreens, no decay).
         let mut files = Vec::new();
         for sub in &["journal", "topics"] {
-            let dir = self.workspace.join(sub);
+            let dir = self.data_dir.join(sub);
             if !dir.exists() {
                 std::fs::create_dir_all(&dir)?;
             }
@@ -60,7 +59,7 @@ impl Memory {
         let mut result = IndexResult::default();
 
         for abs_path in &files {
-            let rel = rel_path(abs_path, &self.workspace)?;
+            let rel = rel_path(abs_path, &self.data_dir)?;
             let content = std::fs::read_to_string(abs_path)
                 .with_context(|| format!("reading {}", abs_path.display()))?;
             let hash = db::sha256(&content);
@@ -86,7 +85,7 @@ impl Memory {
         // Prune stale files
         let disk_paths: std::collections::HashSet<String> = files
             .iter()
-            .map(|p| rel_path(p, &self.workspace))
+            .map(|p| rel_path(p, &self.data_dir))
             .collect::<Result<_>>()?;
         for stale in stored_paths.difference(&disk_paths) {
             db::delete_chunks(&self.conn, stale)?;
@@ -317,8 +316,8 @@ fn is_dated_filename(name: &str) -> bool {
         && name[8..10].chars().all(|c| c.is_ascii_digit())
 }
 
-pub fn load_context_md(workspace: &Path) -> Option<String> {
-    let path = workspace.join("context.md");
+pub fn load_context_md(data_dir: &Path) -> Option<String> {
+    let path = data_dir.join("context.md");
     std::fs::read_to_string(path).ok()
 }
 
@@ -334,8 +333,8 @@ fn collect_md_files(dir: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-fn rel_path(abs: &Path, workspace: &Path) -> Result<String> {
-    abs.strip_prefix(workspace)
-        .with_context(|| format!("{} not under workspace", abs.display()))
+fn rel_path(abs: &Path, data_dir: &Path) -> Result<String> {
+    abs.strip_prefix(data_dir)
+        .with_context(|| format!("{} not under data_dir", abs.display()))
         .map(|p| p.to_string_lossy().into_owned())
 }

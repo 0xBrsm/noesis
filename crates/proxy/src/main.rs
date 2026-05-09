@@ -79,7 +79,6 @@ async fn main() -> Result<()> {
         cfg.embed_model.as_str()
     };
     let memory = Memory::open(
-        &cfg.workspace,
         &cfg.data_dir,
         model_name,
         cfg.decay_half_life_days,
@@ -115,7 +114,7 @@ async fn main() -> Result<()> {
         &cfg.chat_model,
         &cfg.embed_model,
     ));
-    let journaler = Arc::new(Journaler::new(&cfg.workspace, &cfg.data_dir));
+    let journaler = Arc::new(Journaler::new(&cfg.data_dir));
 
     let bind = cfg.bind;
     let upstream = cfg.upstream.clone();
@@ -270,7 +269,7 @@ async fn run_dream_if_due(state: Arc<AppState>) {
 
     tracing::info!("dream: starting consolidation");
 
-    let plan = match run_consolidation(&state.cfg.workspace, state.chat.as_ref(), last_ts).await {
+    let plan = match run_consolidation(&state.cfg.data_dir, state.chat.as_ref(), last_ts).await {
         Ok(p) => p,
         Err(e) => {
             tracing::warn!("dream: consolidation failed: {e}");
@@ -282,7 +281,7 @@ async fn run_dream_if_due(state: Arc<AppState>) {
     let updates = plan.updates.len();
     let deletes = plan.deletes.len();
 
-    let changed = match apply_plan(&state.cfg.workspace, &plan).await {
+    let changed = match apply_plan(&state.cfg.data_dir, &plan).await {
         Ok(n) => n,
         Err(e) => {
             tracing::warn!("dream: apply plan: {e}");
