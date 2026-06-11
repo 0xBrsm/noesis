@@ -59,7 +59,7 @@ pub struct TopicUpdate {
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
-pub struct ConsolidationPlan {
+pub struct DreamPlan {
     #[serde(default)]
     pub updates: Vec<TopicUpdate>,
     #[serde(default)]
@@ -151,12 +151,22 @@ impl AutoDream {
     pub async fn should_run(&self, user_messages_since: usize) -> Result<bool> {
         let state = self.load_state().await;
         if !self.time_gate(&state) {
+            tracing::debug!(
+                min_hours = self.config.min_hours,
+                "dream: time gate not met"
+            );
             return Ok(false);
         }
         if !self.message_gate(user_messages_since) {
+            tracing::info!(
+                user_messages_since,
+                min = self.config.min_user_messages,
+                "dream: due but message gate not met"
+            );
             return Ok(false);
         }
         if !self.lock_gate().await? {
+            tracing::info!("dream: due but consolidation lock held");
             return Ok(false);
         }
         self.acquire_lock().await?;
@@ -197,33 +207,33 @@ fn now_secs() -> u64 {
 /// Runs the 3-phase agentic consolidation, chained via `previous_response_id`
 /// so phases share the upstream prompt cache. Returns the plan; the caller is
 /// responsible for `apply_plan` + re-index.
-pub async fn run_consolidation(
+pub async fn run_dream(
     data_dir: &Path,
     llm: &RemoteLLM,
     system_prompt: &str,
     last_consolidated_at: f64,
-) -> Result<ConsolidationPlan> {
+) -> Result<DreamPlan> {
     let journal_dir = data_dir.join("journal");
     let journal_text = read_journal_since(&journal_dir, last_consolidated_at).await?;
-    run_consolidation_with_text(data_dir, llm, system_prompt, &journal_text).await
+    run_dream_with_text(data_dir, llm, system_prompt, &journal_text).await
 }
 
-/// Same as `run_consolidation`, but the caller supplies the journal text
+/// Same as `run_dream`, but the caller supplies the journal text
 /// directly. Lets backfill drive consolidation one window at a time without
 /// relying on file mtimes (which are meaningless for imported journals).
-pub async fn run_consolidation_with_text(
+pub async fn run_dream_with_text(
     data_dir: &Path,
     llm: &RemoteLLM,
     system_prompt: &str,
     journal_text: &str,
-) -> Result<ConsolidationPlan> {
+) -> Result<DreamPlan> {
     let topics_dir = data_dir.join("topics");
     fs::create_dir_all(&topics_dir).await?;
 
     let topic_summaries = list_topic_summaries(&topics_dir).await?;
 
     if journal_text.trim().is_empty() {
-        return Ok(ConsolidationPlan::default());
+        return Ok(DreamPlan::default());
     }
 
     // Phase 1 — Orient. Skim existing topic files so you improve them rather
@@ -282,7 +292,9 @@ pub async fn run_consolidation_with_text(
                 - `summary` is the topic's permanent 1-2 sentence summary used by future consolidation passes to navigate without reading the body. Write it for retrieval: name the subject, list the key facets. Keep it stable across re-summarizations — do NOT add changelog-style phrasing like \"updated with X\".\n\
                 - create/replace: provide complete, well-organized markdown content.\n\
                 - append: provide just the new content to append; `summary` is ignored.\n\
-                - Only delete topics that are obsolete or strictly subsumed elsewhere.\n\
+                - Prefer updating an existing topic over creating a new one. Create only when no existing topic plausibly owns the subject.\n\
+                - Actively merge: when topics overlap or a topic is a fragment of a larger subject, fold them into one well-organized file (replace) and delete the absorbed slugs. Retrieval works on sections within a file, so a large well-structured topic beats several small overlapping ones.\n\
+                - Delete topics that are obsolete or now covered elsewhere.\n\
                 - If nothing meaningful changed, return {\"updates\": [], \"deletes\": []}.\n\
                 Output ONLY the JSON object — no preamble, no code fences.".to_string(),
         },
@@ -292,7 +304,7 @@ pub async fn run_consolidation_with_text(
     parse_plan(&plan_text)
 }
 
-pub fn parse_plan(text: &str) -> Result<ConsolidationPlan> {
+pub fn parse_plan(text: &str) -> Result<DreamPlan> {
     let s = text.trim();
     let s = s
         .strip_prefix("```json")
@@ -305,7 +317,7 @@ pub fn parse_plan(text: &str) -> Result<ConsolidationPlan> {
 
 /// Apply a consolidation plan to `<data_dir>/topics/`. Returns the number of
 /// files written or removed.
-pub async fn apply_plan(data_dir: &Path, plan: &ConsolidationPlan) -> Result<usize> {
+pub async fn apply_plan(data_dir: &Path, plan: &DreamPlan) -> Result<usize> {
     let topics_dir = data_dir.join("topics");
     fs::create_dir_all(&topics_dir).await?;
     let mut changed = 0usize;

@@ -19,6 +19,10 @@ path = "src/bin/dream-backfill.rs"
 name = "noesis-query"
 path = "src/bin/query.rs"
 
+[[bin]]
+name = "noesis-consolidate"
+path = "src/bin/consolidate.rs"
+
 [dependencies]
 noesis-memory = { workspace = true }
 

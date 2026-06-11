@@ -13,7 +13,7 @@ use chrono::{NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
 use clap::Parser;
 use noesis_memory::{
     Config as MemConfig, Embedder, Memory, RemoteLLM, apply_plan, load_topic_prompt,
-    run_consolidation_with_text,
+    run_dream_with_text,
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -147,7 +147,7 @@ async fn main() -> Result<()> {
             "dream-backfill: consolidating"
         );
 
-        let plan = match run_consolidation_with_text(
+        let plan = match run_dream_with_text(
             &cfg.data_dir,
             &summarizer,
             &topic_prompt,

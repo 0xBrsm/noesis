@@ -20,8 +20,9 @@ use clap::Parser;
 use futures::StreamExt;
 use noesis_memory::{
     AutoDream, Config as MemConfig, Embedder, Journaler, LLM, Memory, Message,
-    RemoteLLM, Reranker, Role, SearchRow, apply_plan, format_context_block, load_context_md,
-    load_journal_prompt, load_topic_prompt, run_consolidation,
+    RemoteLLM, Reranker, RetrievalEvent, Role, SearchRow, apply_plan, format_context_block,
+    load_context_md,
+    load_journal_prompt, load_topic_prompt, run_dream,
 };
 use reqwest::Client;
 use serde_json::{Value, json};
@@ -143,6 +144,7 @@ async fn main() -> Result<()> {
     });
 
     spawn_journal_loop(state.clone());
+    spawn_dream_loop(state.clone());
 
     let app = Router::new()
         .route("/v1/responses", post(handle_responses))
@@ -185,6 +187,12 @@ async fn run_journal_tick(state: Arc<AppState>) {
     };
 
     if !state.journaler.should_run(&st, turns.len()) {
+        if !turns.is_empty() {
+            tracing::info!(
+                pending_turns = turns.len(),
+                "journal: gate not met, holding turns for next tick"
+            );
+        }
         return;
     }
 
@@ -245,12 +253,23 @@ async fn run_journal_tick(state: Arc<AppState>) {
         turns = turns.len(),
         "journal entry appended"
     );
-
-    // Try a dream consolidation; gates inside ensure it only runs when due.
-    tokio::spawn(run_dream_if_due(state));
 }
 
 // ── Background dream consolidation ──────────────────────────────────────────
+
+/// Independent of the journal loop — a failed or skipped journal tick must
+/// not silently starve consolidation. Gates inside make each check cheap.
+fn spawn_dream_loop(state: Arc<AppState>) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(1800));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        tick.tick().await;
+        loop {
+            tick.tick().await;
+            run_dream_if_due(state.clone()).await;
+        }
+    });
+}
 
 async fn run_dream_if_due(state: Arc<AppState>) {
     let auto_dream = AutoDream::new(&state.cfg.data_dir);
@@ -280,7 +299,7 @@ async fn run_dream_if_due(state: Arc<AppState>) {
     tracing::info!("dream: starting consolidation");
 
     let topic_prompt = load_topic_prompt(&state.cfg.data_dir);
-    let plan = match run_consolidation(
+    let plan = match run_dream(
         &state.cfg.data_dir,
         state.chat.as_ref(),
         &topic_prompt,
@@ -351,9 +370,14 @@ async fn handle_responses(
         Vec::new()
     } else {
         let raw = retrieve_context(&state, &user_input).await;
-        let mut seen = state.seen_chunk_ids.lock().await;
+        let injected: Vec<bool> = {
+            let mut seen = state.seen_chunk_ids.lock().await;
+            raw.iter().map(|r| seen.insert(r.id.clone())).collect()
+        };
+        log_retrievals(&state, &user_input, &raw, &injected).await;
         raw.into_iter()
-            .filter(|r| seen.insert(r.id.clone()))
+            .zip(injected)
+            .filter_map(|(r, inj)| inj.then_some(r))
             .collect()
     };
 
@@ -564,6 +588,25 @@ async fn retrieve_context(state: &AppState, query: &str) -> Vec<SearchRow> {
             tracing::warn!("retrieval failed: {e}");
             Vec::new()
         }
+    }
+}
+
+/// Record every retrieval candidate (injected or deduped) for one query.
+/// Training data for learned ranking/retention; best-effort, never blocks.
+async fn log_retrievals(state: &AppState, query: &str, rows: &[SearchRow], injected: &[bool]) {
+    if rows.is_empty() {
+        return;
+    }
+    let events: Vec<RetrievalEvent<'_>> = rows
+        .iter()
+        .zip(injected)
+        .enumerate()
+        .map(|(rank, (row, inj))| RetrievalEvent { row, rank, injected: *inj })
+        .collect();
+    let turn = state.next_turn.load(Ordering::SeqCst);
+    let mem = state.memory.lock().await;
+    if let Err(e) = mem.log_retrievals(&state.session_id, turn, query, &events) {
+        tracing::warn!("retrieval log failed: {e}");
     }
 }
 

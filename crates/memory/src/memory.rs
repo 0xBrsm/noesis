@@ -217,6 +217,22 @@ impl Memory {
         db::count_user_messages_since(&self.conn, since_ts)
     }
 
+    /// Stored chunk embeddings for top-level topic files, for consolidation
+    /// clustering. Pairs are (chunk path, vector).
+    pub fn topic_embeddings(&self) -> Result<Vec<(String, Vec<f32>)>> {
+        db::load_topic_embeddings(&self.conn)
+    }
+
+    pub fn log_retrievals(
+        &self,
+        session_id: &str,
+        turn_index: usize,
+        query: &str,
+        events: &[db::RetrievalEvent<'_>],
+    ) -> Result<()> {
+        db::log_retrievals(&self.conn, session_id, turn_index, query, events)
+    }
+
     // ── Search ────────────────────────────────────────────────────────────────
 
     pub fn search_keyword(&self, query: &str, limit: usize) -> Result<Vec<SearchRow>> {
@@ -379,6 +395,10 @@ pub fn load_journal_prompt(data_dir: &Path) -> String {
 
 pub fn load_topic_prompt(data_dir: &Path) -> String {
     load_prompt(data_dir, "topic", crate::dream::TOPIC_PROMPT)
+}
+
+pub fn load_consolidate_prompt(data_dir: &Path) -> String {
+    load_prompt(data_dir, "consolidate", crate::consolidate::CONSOLIDATE_PROMPT)
 }
 
 fn collect_md_files(dir: &Path) -> Vec<PathBuf> {

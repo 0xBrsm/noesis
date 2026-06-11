@@ -68,6 +68,25 @@ fn ensure_schema(conn: &Connection) -> Result<()> {
 
         CREATE INDEX IF NOT EXISTS conversations_role_ts
             ON conversations (role, ts);
+
+        CREATE TABLE IF NOT EXISTS retrievals (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts           REAL NOT NULL,
+            session_id   TEXT NOT NULL,
+            turn_index   INTEGER NOT NULL,
+            query        TEXT NOT NULL,
+            chunk_id     TEXT NOT NULL,
+            chunk_path   TEXT NOT NULL,
+            rank         INTEGER NOT NULL,
+            score        REAL NOT NULL,
+            raw_score    REAL NOT NULL,
+            vector_score REAL,
+            text_score   REAL,
+            injected     INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS retrievals_chunk_ts
+            ON retrievals (chunk_id, ts);
     ")?;
     Ok(())
 }
@@ -292,6 +311,30 @@ pub fn upsert_vec(conn: &Connection, id: &str, embedding: &[f32]) -> Result<()> 
         params![id, blob],
     )?;
     Ok(())
+}
+
+/// Chunk embeddings for top-level topic files, as (path, vector) pairs.
+/// Nested paths (e.g. hand-dropped doc trees under topics/) are excluded —
+/// consolidation only merges flat `topics/<slug>.md` files.
+pub fn load_topic_embeddings(conn: &Connection) -> Result<Vec<(String, Vec<f32>)>> {
+    let mut stmt = conn.prepare(
+        "SELECT path, embedding FROM chunks
+         WHERE path LIKE 'topics/%' AND path NOT LIKE 'topics/%/%'
+           AND embedding IS NOT NULL",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (path, blob) = row?;
+        let vec: Vec<f32> = blob
+            .chunks_exact(4)
+            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .collect();
+        out.push((path, vec));
+    }
+    Ok(out)
 }
 
 pub fn list_file_paths(conn: &Connection) -> Result<Vec<String>> {
@@ -528,6 +571,53 @@ pub fn search_hybrid(
     merged.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
     merged.truncate(limit);
     Ok(merged)
+}
+
+// ── Retrieval log ─────────────────────────────────────────────────────────────
+
+/// One retrieval candidate to record: the row, its post-rerank rank, and
+/// whether it survived chain dedup and was actually injected.
+pub struct RetrievalEvent<'a> {
+    pub row: &'a SearchRow,
+    pub rank: usize,
+    pub injected: bool,
+}
+
+/// Append retrieval candidates for one query to the log. Training data for
+/// learned ranking/retention later; cheap to write, never read on the hot path.
+pub fn log_retrievals(
+    conn: &Connection,
+    session_id: &str,
+    turn_index: usize,
+    query: &str,
+    events: &[RetrievalEvent<'_>],
+) -> Result<()> {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs_f64();
+    let mut stmt = conn.prepare_cached(
+        "INSERT INTO retrievals
+            (ts, session_id, turn_index, query, chunk_id, chunk_path,
+             rank, score, raw_score, vector_score, text_score, injected)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+    )?;
+    for e in events {
+        stmt.execute(params![
+            ts,
+            session_id,
+            turn_index as i64,
+            query,
+            e.row.id,
+            e.row.path,
+            e.rank as i64,
+            e.row.score as f64,
+            e.row.raw_score as f64,
+            e.row.vector_score.map(|v| v as f64),
+            e.row.text_score.map(|v| v as f64),
+            e.injected as i64,
+        ])?;
+    }
+    Ok(())
 }
 
 // ── FTS helpers ───────────────────────────────────────────────────────────────
