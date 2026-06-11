@@ -601,7 +601,7 @@ async fn log_retrievals(state: &AppState, query: &str, rows: &[SearchRow], injec
         .iter()
         .zip(injected)
         .enumerate()
-        .map(|(rank, (row, inj))| RetrievalEvent { row, rank, injected: *inj })
+        .map(|(rank, (row, inj))| RetrievalEvent { row, rank, injected: *inj, label: None })
         .collect();
     let turn = state.next_turn.load(Ordering::SeqCst);
     let mem = state.memory.lock().await;

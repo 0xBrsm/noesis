@@ -23,6 +23,10 @@ path = "src/bin/query.rs"
 name = "noesis-consolidate"
 path = "src/bin/consolidate.rs"
 
+[[bin]]
+name = "noesis-retrieval-replay"
+path = "src/bin/retrieval-replay.rs"
+
 [dependencies]
 noesis-memory = { workspace = true }
 

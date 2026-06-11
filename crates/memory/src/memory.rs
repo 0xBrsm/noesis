@@ -233,6 +233,14 @@ impl Memory {
         db::log_retrievals(&self.conn, session_id, turn_index, query, events)
     }
 
+    pub fn unreplayed_qa_pairs(&self, limit: usize) -> Result<Vec<db::QaPair>> {
+        db::load_unreplayed_qa_pairs(&self.conn, limit)
+    }
+
+    pub fn chunk_embedding(&self, id: &str) -> Result<Option<Vec<f32>>> {
+        db::load_chunk_embedding(&self.conn, id)
+    }
+
     // ── Search ────────────────────────────────────────────────────────────────
 
     pub fn search_keyword(&self, query: &str, limit: usize) -> Result<Vec<SearchRow>> {

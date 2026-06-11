@@ -18,7 +18,7 @@ pub use config::Config;
 pub use consolidate::{
     CONSOLIDATE_PROMPT, ConsolidateStats, cluster_topics, consolidate_topics, topic_centroids,
 };
-pub use db::{RetrievalEvent, SearchRow};
+pub use db::{QaPair, RetrievalEvent, SearchRow};
 pub use dream::{
     AutoDream, DreamPlan, Operation, TOPIC_PROMPT, TopicUpdate, apply_plan,
     run_dream, run_dream_with_text,

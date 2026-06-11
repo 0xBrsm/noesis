@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
@@ -82,12 +82,21 @@ fn ensure_schema(conn: &Connection) -> Result<()> {
             raw_score    REAL NOT NULL,
             vector_score REAL,
             text_score   REAL,
-            injected     INTEGER NOT NULL
+            injected     INTEGER NOT NULL,
+            label        REAL
         );
 
         CREATE INDEX IF NOT EXISTS retrievals_chunk_ts
             ON retrievals (chunk_id, ts);
     ")?;
+
+    // Migration for retrievals tables created before the label column existed.
+    let has_label = conn
+        .prepare("SELECT 1 FROM pragma_table_info('retrievals') WHERE name='label'")?
+        .exists([])?;
+    if !has_label {
+        conn.execute("ALTER TABLE retrievals ADD COLUMN label REAL", [])?;
+    }
     Ok(())
 }
 
@@ -328,13 +337,23 @@ pub fn load_topic_embeddings(conn: &Connection) -> Result<Vec<(String, Vec<f32>)
     let mut out = Vec::new();
     for row in rows {
         let (path, blob) = row?;
-        let vec: Vec<f32> = blob
-            .chunks_exact(4)
-            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-            .collect();
-        out.push((path, vec));
+        out.push((path, decode_embedding(&blob)));
     }
     Ok(out)
+}
+
+fn decode_embedding(blob: &[u8]) -> Vec<f32> {
+    blob.chunks_exact(4)
+        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        .collect()
+}
+
+pub fn load_chunk_embedding(conn: &Connection, id: &str) -> Result<Option<Vec<f32>>> {
+    let blob: Option<Vec<u8>> = conn
+        .prepare_cached("SELECT embedding FROM chunks WHERE id = ?1")?
+        .query_row([id], |r| r.get(0))
+        .optional()?;
+    Ok(blob.map(|b| decode_embedding(&b)))
 }
 
 pub fn list_file_paths(conn: &Connection) -> Result<Vec<String>> {
@@ -576,11 +595,13 @@ pub fn search_hybrid(
 // ── Retrieval log ─────────────────────────────────────────────────────────────
 
 /// One retrieval candidate to record: the row, its post-rerank rank, and
-/// whether it survived chain dedup and was actually injected.
+/// whether it survived chain dedup and was actually injected. `label` is a
+/// relevance signal filled in by offline replay (None for live traffic).
 pub struct RetrievalEvent<'a> {
     pub row: &'a SearchRow,
     pub rank: usize,
     pub injected: bool,
+    pub label: Option<f32>,
 }
 
 /// Append retrieval candidates for one query to the log. Training data for
@@ -598,8 +619,8 @@ pub fn log_retrievals(
     let mut stmt = conn.prepare_cached(
         "INSERT INTO retrievals
             (ts, session_id, turn_index, query, chunk_id, chunk_path,
-             rank, score, raw_score, vector_score, text_score, injected)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+             rank, score, raw_score, vector_score, text_score, injected, label)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
     )?;
     for e in events {
         stmt.execute(params![
@@ -615,9 +636,53 @@ pub fn log_retrievals(
             e.row.vector_score.map(|v| v as f64),
             e.row.text_score.map(|v| v as f64),
             e.injected as i64,
+            e.label.map(|v| v as f64),
         ])?;
     }
     Ok(())
+}
+
+/// A user turn paired with the assistant response that followed it.
+#[derive(Debug, Clone)]
+pub struct QaPair {
+    pub session_id: String,
+    pub turn_index: usize,
+    pub ts: f64,
+    pub question: String,
+    pub answer: String,
+}
+
+/// Load user/assistant pairs that have no retrieval log rows yet, oldest
+/// first — the replay work queue. `limit` of 0 means no limit.
+pub fn load_unreplayed_qa_pairs(conn: &Connection, limit: usize) -> Result<Vec<QaPair>> {
+    let mut stmt = conn.prepare(
+        "SELECT u.session_id, u.turn_index, u.ts, u.content, a.content
+         FROM conversations u
+         JOIN conversations a
+           ON a.session_id = u.session_id
+          AND a.turn_index = u.turn_index + 1
+          AND a.role = 'assistant'
+         WHERE u.role = 'user'
+           AND NOT EXISTS (
+               SELECT 1 FROM retrievals r
+               WHERE r.session_id = u.session_id AND r.turn_index = u.turn_index
+           )
+         ORDER BY u.ts, u.turn_index
+         LIMIT ?1",
+    )?;
+    let limit = if limit == 0 { i64::MAX } else { limit as i64 };
+    let rows = stmt
+        .query_map([limit], |r| {
+            Ok(QaPair {
+                session_id: r.get(0)?,
+                turn_index: r.get::<_, i64>(1)? as usize,
+                ts: r.get(2)?,
+                question: r.get(3)?,
+                answer: r.get(4)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
 }
 
 // ── FTS helpers ───────────────────────────────────────────────────────────────
