@@ -18,6 +18,11 @@ pub struct Config {
     pub base_url: String,
     pub api_key: String,
     pub chat_model: String,
+    pub summarizer_model: String,
+    /// Max characters of transcript sent to the summarizer in a single call.
+    /// Drives chunking when a day's content would exceed this. Pick conservatively
+    /// based on the summarizer model's context window (≈3.5–4 chars/token English).
+    pub summarizer_max_chunk_chars: usize,
     pub embed_model: String,
     pub local_embed: bool,
     pub local_embed_model: String,
@@ -58,6 +63,23 @@ impl Config {
     pub fn default_path() -> Option<PathBuf> {
         let home = std::env::var("HOME").ok()?;
         Some(PathBuf::from(home).join(".noesis").join("config.toml"))
+    }
+
+    /// Load from `path`, falling back to `default_path()` when `None`.
+    pub fn load_or_default(path: Option<PathBuf>) -> Result<Self> {
+        let path = path
+            .or_else(Self::default_path)
+            .context("could not resolve config path: $HOME unset and --config not given")?;
+        Self::load(&path)
+    }
+
+    /// Embedding model name as stored alongside indexed chunks.
+    pub fn embed_model_name(&self) -> &str {
+        if self.local_embed {
+            &self.local_embed_model
+        } else {
+            &self.embed_model
+        }
     }
 }
 

@@ -228,6 +228,24 @@ pub enum Embedder {
     Local(LocalLLM),
 }
 
+impl Embedder {
+    pub fn from_config(cfg: &crate::Config) -> Result<Self> {
+        if cfg.local_embed {
+            Ok(Self::Local(LocalLLM::new(
+                &cfg.data_dir.join("models"),
+                &cfg.local_embed_model,
+            )?))
+        } else {
+            Ok(Self::Remote(RemoteLLM::new(
+                &cfg.base_url,
+                &cfg.api_key,
+                &cfg.chat_model,
+                &cfg.embed_model,
+            )))
+        }
+    }
+}
+
 impl LLM for Embedder {
     async fn chat(&self, messages: &[Message]) -> Result<String> {
         match self {

@@ -14,6 +14,7 @@ pub struct Memory {
     vector_weight: f32,
     text_weight: f32,
     decay_half_life_days: f32,
+    orphans_swept: bool,
 }
 
 impl Memory {
@@ -35,12 +36,33 @@ impl Memory {
             vector_weight: semantic_weight,
             text_weight: lexical_weight,
             decay_half_life_days,
+            orphans_swept: false,
         })
+    }
+
+    pub fn open_from_config(cfg: &crate::Config) -> Result<Self> {
+        Self::open(
+            &cfg.data_dir,
+            cfg.embed_model_name(),
+            cfg.decay_half_life_days,
+            cfg.semantic_weight,
+            cfg.lexical_weight,
+        )
     }
 
     // ── Index ─────────────────────────────────────────────────────────────────
 
     pub async fn index<L: LLM>(&mut self, llm: &L) -> Result<IndexResult> {
+        // Orphans only appear after a crash, so one full-scan sweep per
+        // process is enough — re-indexes during the same run stay consistent.
+        if !self.orphans_swept {
+            let orphans = db::sweep_orphan_vecs(&self.conn)?;
+            if orphans > 0 {
+                tracing::info!(orphans, "index: swept orphan chunks_vec rows");
+            }
+            self.orphans_swept = true;
+        }
+
         // Scan journal/ (dated entries, decay) and topics/ (evergreens, no decay).
         let mut files = Vec::new();
         for sub in &["journal", "topics"] {
@@ -67,11 +89,11 @@ impl Memory {
                 .as_secs_f64();
 
             // Skip if hash unchanged
-            if let Some(stored_hash) = db::get_file_hash(&self.conn, &rel)? {
-                if stored_hash == hash {
-                    result.skipped += 1;
-                    continue;
-                }
+            if let Some(stored_hash) = db::get_file_hash(&self.conn, &rel)?
+                && stored_hash == hash
+            {
+                result.skipped += 1;
+                continue;
             }
 
             self.index_file(&rel, &content, &hash, mtime, meta.len(), llm)
@@ -103,20 +125,11 @@ impl Memory {
         size: u64,
         llm: &L,
     ) -> Result<()> {
-        // File record must exist before chunks (foreign key constraint)
-        db::upsert_file(
-            &self.conn,
-            &db::FileEntry {
-                path: rel.to_string(),
-                hash: hash.to_string(),
-                mtime,
-                size,
-            },
-        )?;
-
-        db::delete_chunks(&self.conn, rel)?;
-
+        // Embed everything first (network calls), then write in a single
+        // transaction — a crash mid-file leaves the DB untouched instead of
+        // half-replaced, and avoids orphaned chunks_vec rows.
         let chunks = db::chunk_markdown(content);
+        let mut prepared = Vec::with_capacity(chunks.len());
         let mut first_vec_dims: Option<usize> = None;
 
         for chunk in &chunks {
@@ -131,12 +144,7 @@ impl Memory {
 
             let embedding = match llm.embed(&embed_input).await {
                 Ok(v) => {
-                    if first_vec_dims.is_none() {
-                        first_vec_dims = Some(v.len());
-                        if let Err(e) = db::ensure_vec_table(&self.conn, v.len()) {
-                            tracing::warn!("ensure_vec_table failed: {e}");
-                        }
-                    }
+                    first_vec_dims = first_vec_dims.or(Some(v.len()));
                     Some(v)
                 }
                 Err(e) => {
@@ -144,10 +152,33 @@ impl Memory {
                     None
                 }
             };
+            prepared.push((id, chunk, embedding));
+        }
 
+        // DDL outside the transaction — vec0 virtual table creation.
+        if let Some(dims) = first_vec_dims
+            && let Err(e) = db::ensure_vec_table(&self.conn, dims)
+        {
+            tracing::warn!("ensure_vec_table failed: {e}");
+        }
+
+        let tx = self.conn.transaction()?;
+        // File record must exist before chunks (foreign key constraint)
+        db::upsert_file(
+            &tx,
+            &db::FileEntry {
+                path: rel.to_string(),
+                hash: hash.to_string(),
+                mtime,
+                size,
+            },
+        )?;
+        db::delete_chunks(&tx, rel)?;
+
+        for (id, chunk, embedding) in &prepared {
             db::upsert_chunk(
-                &self.conn,
-                &id,
+                &tx,
+                id,
                 rel,
                 chunk.start_line,
                 chunk.end_line,
@@ -155,11 +186,11 @@ impl Memory {
                 &chunk.text,
                 embedding.as_deref(),
             )?;
-
-            if let Some(ref v) = embedding {
-                db::upsert_vec(&self.conn, &id, v)?;
+            if let Some(v) = embedding {
+                db::upsert_vec(&tx, id, v)?;
             }
         }
+        tx.commit()?;
 
         Ok(())
     }
@@ -182,8 +213,8 @@ impl Memory {
         db::last_response_id(&self.conn)
     }
 
-    pub fn sessions_since(&self, since_ts: f64) -> Result<usize> {
-        db::count_sessions_since(&self.conn, since_ts)
+    pub fn user_messages_since(&self, since_ts: f64) -> Result<usize> {
+        db::count_user_messages_since(&self.conn, since_ts)
     }
 
     // ── Search ────────────────────────────────────────────────────────────────
@@ -311,9 +342,43 @@ fn is_dated_filename(name: &str) -> bool {
         && name[8..10].chars().all(|c| c.is_ascii_digit())
 }
 
+/// Render retrieved chunks as the exact `<retrieved_memory>` block the proxy
+/// injects into the LLM input. Kept here so `noesis-query` and the live
+/// proxy can't drift on framing.
+pub fn format_context_block(rows: &[db::SearchRow]) -> String {
+    let mut s = String::from(
+        "<retrieved_memory>\nThe following notes from the user's persistent memory may be relevant. \
+         Use them when they apply; ignore them when they don't.\n\n",
+    );
+    for row in rows {
+        s.push_str(&format!(
+            "[{} L{}-{}]\n{}\n\n",
+            row.path, row.start_line, row.end_line, row.text
+        ));
+    }
+    s.push_str("</retrieved_memory>");
+    s
+}
+
 pub fn load_context_md(data_dir: &Path) -> Option<String> {
     let path = data_dir.join("context.md");
     std::fs::read_to_string(path).ok()
+}
+
+/// Read a user-overridable prompt from `{data_dir}/{name}.md`. If the file
+/// is missing or unreadable, return the compiled default. Lets operators
+/// tune framing without rebuilding the binary.
+pub fn load_prompt(data_dir: &Path, name: &str, default: &str) -> String {
+    let path = data_dir.join(format!("{name}.md"));
+    std::fs::read_to_string(path).unwrap_or_else(|_| default.to_string())
+}
+
+pub fn load_journal_prompt(data_dir: &Path) -> String {
+    load_prompt(data_dir, "journal", crate::journal::JOURNAL_PROMPT)
+}
+
+pub fn load_topic_prompt(data_dir: &Path) -> String {
+    load_prompt(data_dir, "topic", crate::dream::TOPIC_PROMPT)
 }
 
 fn collect_md_files(dir: &Path) -> Vec<PathBuf> {

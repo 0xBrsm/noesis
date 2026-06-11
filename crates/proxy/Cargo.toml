@@ -7,6 +7,18 @@ edition.workspace = true
 name = "noesis-proxy"
 path = "src/main.rs"
 
+[[bin]]
+name = "noesis-backfill"
+path = "src/bin/backfill.rs"
+
+[[bin]]
+name = "noesis-dream-backfill"
+path = "src/bin/dream-backfill.rs"
+
+[[bin]]
+name = "noesis-query"
+path = "src/bin/query.rs"
+
 [dependencies]
 noesis-memory = { workspace = true }
 
@@ -39,3 +51,4 @@ tracing-subscriber = { workspace = true }
 
 # Utilities
 uuid = { workspace = true }
+chrono = { workspace = true }

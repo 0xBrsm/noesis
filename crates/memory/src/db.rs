@@ -65,6 +65,9 @@ fn ensure_schema(conn: &Connection) -> Result<()> {
 
         CREATE INDEX IF NOT EXISTS conversations_session
             ON conversations (session_id, turn_index);
+
+        CREATE INDEX IF NOT EXISTS conversations_role_ts
+            ON conversations (role, ts);
     ")?;
     Ok(())
 }
@@ -103,14 +106,19 @@ pub struct Chunk {
 /// Each section (header + body) becomes one chunk.
 /// Content before the first header is its own chunk with empty context.
 /// `context` is the breadcrumb path of parent headers, used for contextual embedding.
+///
+/// A leading YAML frontmatter block (`---\n...\n---`) is skipped — it's
+/// navigational metadata (summary, aliases) used by the consolidation agent
+/// and would otherwise clutter retrieval results.
 pub fn chunk_markdown(content: &str) -> Vec<Chunk> {
     let lines: Vec<&str> = content.lines().collect();
+    let body_start = frontmatter_end(&lines);
     let mut chunks: Vec<Chunk> = Vec::new();
 
     // Track header hierarchy [h1, h2, h3]
     let mut headers: [Option<String>; 3] = [None, None, None];
 
-    let mut section_start: usize = 0;
+    let mut section_start: usize = body_start;
     let mut section_lines: Vec<&str> = Vec::new();
     let mut section_context = String::new();
 
@@ -125,7 +133,7 @@ pub fn chunk_markdown(content: &str) -> Vec<Chunk> {
         });
     };
 
-    for (i, &line) in lines.iter().enumerate() {
+    for (i, &line) in lines.iter().enumerate().skip(body_start) {
         let level = header_level(line);
         if let Some(lvl) = level {
             // Flush current section
@@ -151,6 +159,22 @@ pub fn chunk_markdown(content: &str) -> Vec<Chunk> {
     flush(&section_lines, section_start, &section_context, &mut chunks);
 
     chunks
+}
+
+/// Index of the first body line after a leading YAML frontmatter block,
+/// or 0 if the content doesn't start with one. A frontmatter block is
+/// `---` on its own line, followed by metadata, followed by another `---`.
+fn frontmatter_end(lines: &[&str]) -> usize {
+    if lines.first().map(|l| l.trim()) != Some("---") {
+        return 0;
+    }
+    for (i, line) in lines.iter().enumerate().skip(1) {
+        if line.trim() == "---" {
+            return i + 1;
+        }
+    }
+    // Unclosed frontmatter — treat the whole file as body.
+    0
 }
 
 fn header_level(line: &str) -> Option<usize> {
@@ -213,6 +237,22 @@ pub fn delete_chunks(conn: &Connection, path: &str) -> Result<()> {
     Ok(())
 }
 
+/// Drop rows from `chunks_vec` whose `id` no longer exists in `chunks`.
+/// `delete_chunks` deletes vec rows via an id-join through `chunks`; if a prior
+/// run crashed between writing the two tables, the vec row becomes unreachable
+/// and a future `upsert_vec` may collide on it (vec0 doesn't honor INSERT OR
+/// REPLACE the same way regular tables do).
+pub fn sweep_orphan_vecs(conn: &Connection) -> Result<usize> {
+    if !vec_table_exists(conn) {
+        return Ok(0);
+    }
+    let n = conn.execute(
+        "DELETE FROM chunks_vec WHERE id NOT IN (SELECT id FROM chunks)",
+        [],
+    )?;
+    Ok(n)
+}
+
 pub fn upsert_chunk(
     conn: &Connection,
     id: &str,
@@ -244,8 +284,11 @@ pub fn upsert_chunk(
 
 pub fn upsert_vec(conn: &Connection, id: &str, embedding: &[f32]) -> Result<()> {
     let blob: Vec<u8> = embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
+    // vec0 doesn't reliably honor INSERT OR REPLACE — explicit DELETE+INSERT
+    // is the documented-safe pattern and idempotent against orphan rows.
+    conn.execute("DELETE FROM chunks_vec WHERE id = ?", params![id])?;
     conn.execute(
-        "INSERT OR REPLACE INTO chunks_vec (id, embedding) VALUES (?1, ?2)",
+        "INSERT INTO chunks_vec (id, embedding) VALUES (?1, ?2)",
         params![id, blob],
     )?;
     Ok(())
@@ -323,10 +366,13 @@ pub fn load_turns_since(conn: &Connection, since_ts: f64) -> Result<Vec<(String,
     Ok(turns)
 }
 
-/// Count distinct sessions that have turns after `since_ts` (unix seconds as f64).
-pub fn count_sessions_since(conn: &Connection, since_ts: f64) -> Result<usize> {
+/// Count user messages stored after `since_ts` (unix seconds as f64). This is
+/// the signal for "enough new input to consolidate" — session_id is a poor
+/// proxy because it's per-process (long conversations undercount, restart
+/// loops overcount).
+pub fn count_user_messages_since(conn: &Connection, since_ts: f64) -> Result<usize> {
     let count: i64 = conn.query_row(
-        "SELECT COUNT(DISTINCT session_id) FROM conversations WHERE ts > ?",
+        "SELECT COUNT(*) FROM conversations WHERE role = 'user' AND ts > ?",
         [since_ts],
         |r| r.get(0),
     )?;
@@ -506,12 +552,16 @@ static STOP_WORDS: std::sync::LazyLock<std::collections::HashSet<&'static str>> 
     });
 
 fn build_fts_query(raw: &str) -> Option<String> {
+    // Prefix-match each token (`token*`) so a query for "world" hits indexed
+    // tokens like "worldbuilding" or "worlds". The default unicode61 tokenizer
+    // splits only on non-alphanumeric, so without `*` a phrase query for
+    // "world" requires that exact standalone token in the index.
     let tokens: Vec<String> = raw
         .split(|c: char| !c.is_alphanumeric() && c != '_')
         .filter(|t| !t.is_empty())
         .filter(|t| t.len() >= 2)
         .filter(|t| !STOP_WORDS.contains(t.to_lowercase().as_str()))
-        .map(|t| format!("\"{}\"", t.replace('"', "")))
+        .map(|t| format!("{t}*"))
         .collect();
     if tokens.is_empty() {
         None

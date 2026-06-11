@@ -13,7 +13,7 @@ use tokio::fs;
 
 use crate::llm::{Message, RemoteLLM, Role};
 
-pub const DREAM_PROMPT: &str = "\
+pub const TOPIC_PROMPT: &str = "\
 # Dream: Memory Consolidation
 
 You are performing a dream — a reflective pass over the user's memory files. \
@@ -38,12 +38,23 @@ Guiding principles (apply across all phases):
 You will work in three phases. Each phase has a specific output format — follow \
 it exactly.";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Operation {
+    Create,
+    Replace,
+    Append,
+    /// Catch-all for malformed LLM output — skipped with a warning.
+    #[serde(other)]
+    Unknown,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct TopicUpdate {
     pub name: String,
-    pub operation: String, // "create" | "replace" | "append"
+    pub operation: Operation,
     #[serde(default)]
-    pub description: String,
+    pub summary: String,
     pub content: String,
 }
 
@@ -58,12 +69,14 @@ pub struct ConsolidationPlan {
 #[derive(Debug, Clone)]
 pub struct AutoDreamConfig {
     pub min_hours: f64,
-    pub min_sessions: usize,
+    /// User messages written since last consolidation. Sessions are a misleading
+    /// proxy (per-process UUIDs over- or under-trigger depending on usage shape).
+    pub min_user_messages: usize,
 }
 
 impl Default for AutoDreamConfig {
     fn default() -> Self {
-        Self { min_hours: 24.0, min_sessions: 5 }
+        Self { min_hours: 24.0, min_user_messages: 30 }
     }
 }
 
@@ -111,9 +124,9 @@ impl AutoDream {
         }
     }
 
-    // Gate 2: caller supplies session count from DB (avoids duplicate DB open)
-    fn session_gate(&self, sessions_since: usize) -> bool {
-        sessions_since >= self.config.min_sessions
+    // Gate 2: caller supplies user-message count from DB (avoids duplicate DB open)
+    fn message_gate(&self, user_messages_since: usize) -> bool {
+        user_messages_since >= self.config.min_user_messages
     }
 
     // Gate 3: no active lock (stale after 1h)
@@ -134,13 +147,13 @@ impl AutoDream {
     }
 
     /// Returns true (and acquires lock) if all gates pass.
-    /// `sessions_since` = distinct sessions in DB since last_consolidated_at.
-    pub async fn should_run(&self, sessions_since: usize) -> Result<bool> {
+    /// `user_messages_since` = user-role rows in DB since last_consolidated_at.
+    pub async fn should_run(&self, user_messages_since: usize) -> Result<bool> {
         let state = self.load_state().await;
         if !self.time_gate(&state) {
             return Ok(false);
         }
-        if !self.session_gate(sessions_since) {
+        if !self.message_gate(user_messages_since) {
             return Ok(false);
         }
         if !self.lock_gate().await? {
@@ -187,23 +200,36 @@ fn now_secs() -> u64 {
 pub async fn run_consolidation(
     data_dir: &Path,
     llm: &RemoteLLM,
+    system_prompt: &str,
     last_consolidated_at: f64,
 ) -> Result<ConsolidationPlan> {
-    let topics_dir = data_dir.join("topics");
     let journal_dir = data_dir.join("journal");
+    let journal_text = read_journal_since(&journal_dir, last_consolidated_at).await?;
+    run_consolidation_with_text(data_dir, llm, system_prompt, &journal_text).await
+}
+
+/// Same as `run_consolidation`, but the caller supplies the journal text
+/// directly. Lets backfill drive consolidation one window at a time without
+/// relying on file mtimes (which are meaningless for imported journals).
+pub async fn run_consolidation_with_text(
+    data_dir: &Path,
+    llm: &RemoteLLM,
+    system_prompt: &str,
+    journal_text: &str,
+) -> Result<ConsolidationPlan> {
+    let topics_dir = data_dir.join("topics");
     fs::create_dir_all(&topics_dir).await?;
 
     let topic_summaries = list_topic_summaries(&topics_dir).await?;
-    let journal_text = read_journal_since(&journal_dir, last_consolidated_at).await?;
 
     if journal_text.trim().is_empty() {
         return Ok(ConsolidationPlan::default());
     }
 
     // Phase 1 — Orient. Skim existing topic files so you improve them rather
-    // than creating duplicates. (Lifted from claurst consolidation_prompt.)
+    // than creating duplicates.
     let phase1 = vec![
-        Message { role: Role::System, content: DREAM_PROMPT.to_string() },
+        Message { role: Role::System, content: system_prompt.to_string() },
         Message {
             role: Role::User,
             content: format!(
@@ -225,7 +251,7 @@ pub async fn run_consolidation(
     // Phase 2 — Gather recent signal. Look for new information worth persisting,
     // and existing memories that have drifted — facts the journal now contradicts.
     let phase2 = vec![
-        Message { role: Role::System, content: DREAM_PROMPT.to_string() },
+        Message { role: Role::System, content: system_prompt.to_string() },
         Message {
             role: Role::User,
             content: format!(
@@ -245,16 +271,17 @@ pub async fn run_consolidation(
 
     // Phase 3 — Consolidate
     let phase3 = vec![
-        Message { role: Role::System, content: DREAM_PROMPT.to_string() },
+        Message { role: Role::System, content: system_prompt.to_string() },
         Message {
             role: Role::User,
             content:
                 "Phase 3 (Consolidate). Output a JSON plan to update the topic files. Schema:\n\
-                {\n  \"updates\": [{\"name\": \"<kebab-case-slug>\", \"operation\": \"create|replace|append\", \"description\": \"<one-line summary>\", \"content\": \"<markdown body>\"}],\n  \"deletes\": [\"<slug>\"]\n}\n\
+                {\n  \"updates\": [{\"name\": \"<kebab-case-slug>\", \"operation\": \"create|replace|append\", \"summary\": \"<stable 1-2 sentence topic summary>\", \"content\": \"<markdown body>\"}],\n  \"deletes\": [\"<slug>\"]\n}\n\
                 Rules:\n\
                 - Slugs are kebab-case, no .md extension; the slug is the filename.\n\
+                - `summary` is the topic's permanent 1-2 sentence summary used by future consolidation passes to navigate without reading the body. Write it for retrieval: name the subject, list the key facets. Keep it stable across re-summarizations — do NOT add changelog-style phrasing like \"updated with X\".\n\
                 - create/replace: provide complete, well-organized markdown content.\n\
-                - append: provide just the new content to append.\n\
+                - append: provide just the new content to append; `summary` is ignored.\n\
                 - Only delete topics that are obsolete or strictly subsumed elsewhere.\n\
                 - If nothing meaningful changed, return {\"updates\": [], \"deletes\": []}.\n\
                 Output ONLY the JSON object — no preamble, no code fences.".to_string(),
@@ -289,9 +316,9 @@ pub async fn apply_plan(data_dir: &Path, plan: &ConsolidationPlan) -> Result<usi
             continue;
         }
         let path = topics_dir.join(format!("{slug}.md"));
-        let content = match upd.operation.as_str() {
-            "create" | "replace" => format_topic(&upd.description, &upd.content),
-            "append" => {
+        let content = match upd.operation {
+            Operation::Create | Operation::Replace => format_topic(&upd.summary, &upd.content),
+            Operation::Append => {
                 let existing = fs::read_to_string(&path).await.unwrap_or_default();
                 let sep = if existing.is_empty() || existing.ends_with("\n\n") {
                     ""
@@ -302,8 +329,8 @@ pub async fn apply_plan(data_dir: &Path, plan: &ConsolidationPlan) -> Result<usi
                 };
                 format!("{existing}{sep}{}\n", upd.content.trim())
             }
-            other => {
-                tracing::warn!("dream: unknown operation '{other}' on {slug}");
+            Operation::Unknown => {
+                tracing::warn!("dream: unknown operation on {slug}");
                 continue;
             }
         };
@@ -334,13 +361,13 @@ fn sanitize_slug(name: &str) -> String {
         .collect()
 }
 
-fn format_topic(description: &str, body: &str) -> String {
-    let desc = description.trim();
+fn format_topic(summary: &str, body: &str) -> String {
+    let summary = summary.trim();
     let body = body.trim();
-    if desc.is_empty() {
+    if summary.is_empty() {
         format!("{body}\n")
     } else {
-        format!("---\ndescription: {desc}\n---\n\n{body}\n")
+        format!("---\nsummary: {summary}\n---\n\n{body}\n")
     }
 }
 
@@ -361,7 +388,7 @@ async fn list_topic_summaries(topics_dir: &Path) -> Result<String> {
             .unwrap_or("")
             .to_string();
         let content = fs::read_to_string(&path).await.unwrap_or_default();
-        let desc = extract_description(&content).unwrap_or_else(|| {
+        let summary = extract_summary(&content).unwrap_or_else(|| {
             content
                 .lines()
                 .find(|l| !l.trim().is_empty() && !l.starts_with("---"))
@@ -369,17 +396,19 @@ async fn list_topic_summaries(topics_dir: &Path) -> Result<String> {
                 .trim()
                 .to_string()
         });
-        out.push_str(&format!("- {name} — {desc}\n"));
+        out.push_str(&format!("- {name} — {summary}\n"));
     }
     Ok(out)
 }
 
-fn extract_description(content: &str) -> Option<String> {
+fn extract_summary(content: &str) -> Option<String> {
     let s = content.strip_prefix("---\n")?;
     let end = s.find("\n---")?;
     let frontmatter = &s[..end];
     for line in frontmatter.lines() {
-        if let Some(v) = line.strip_prefix("description:") {
+        // "description:" is the pre-rename key; topic files written before the
+        // summary rename still carry it until their next replace.
+        if let Some(v) = line.strip_prefix("summary:").or_else(|| line.strip_prefix("description:")) {
             return Some(v.trim().to_string());
         }
     }

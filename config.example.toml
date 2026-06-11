@@ -17,6 +17,11 @@ base_url = "https://api.openai.com/v1"
 api_key = "sk-REPLACE_ME"
 
 chat_model = "gpt-5"
+summarizer_model = "gpt-5-mini"
+# Max chars per transcript chunk sent to the summarizer. Days exceeding this
+# are split into multiple `## HH:MM` blocks within the same dated journal file.
+# ~3.5–4 chars/token in English; size conservatively below the model's context.
+summarizer_max_chunk_chars = 240000
 embed_model = "text-embedding-3-small"
 rerank_model = "Xenova/ms-marco-MiniLM-L-6-v2"
 

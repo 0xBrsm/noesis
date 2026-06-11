@@ -16,8 +16,12 @@ pub mod memory;
 pub use config::Config;
 pub use db::SearchRow;
 pub use dream::{
-    AutoDream, ConsolidationPlan, DREAM_PROMPT, TopicUpdate, apply_plan, run_consolidation,
+    AutoDream, ConsolidationPlan, Operation, TOPIC_PROMPT, TopicUpdate, apply_plan,
+    run_consolidation, run_consolidation_with_text,
 };
-pub use journal::{Journaler, SUMMARIZER_PROMPT};
+pub use journal::{BackfillOptions, BackfillStats, JOURNAL_PROMPT, Journaler, backfill_by_date};
 pub use llm::{Embedder, LLM, LocalLLM, Message, RemoteLLM, Reranker, Role};
-pub use memory::{IndexResult, Memory, load_context_md};
+pub use memory::{
+    IndexResult, Memory, format_context_block, load_context_md, load_journal_prompt, load_prompt,
+    load_topic_prompt,
+};

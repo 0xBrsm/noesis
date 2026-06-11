@@ -6,7 +6,7 @@
 //! memory chunks (embedding shortlist → optional reranker) and injects them
 //! as a developer-role input item.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use axum::{
     Router,
     body::Body,
@@ -19,9 +19,9 @@ use bytes::Bytes;
 use clap::Parser;
 use futures::StreamExt;
 use noesis_memory::{
-    AutoDream, Config as MemConfig, Embedder, Journaler, LLM, LocalLLM, Memory, Message,
-    RemoteLLM, Reranker, Role, SUMMARIZER_PROMPT, SearchRow, apply_plan, load_context_md,
-    run_consolidation,
+    AutoDream, Config as MemConfig, Embedder, Journaler, LLM, Memory, Message,
+    RemoteLLM, Reranker, Role, SearchRow, apply_plan, format_context_block, load_context_md,
+    load_journal_prompt, load_topic_prompt, run_consolidation,
 };
 use reqwest::Client;
 use serde_json::{Value, json};
@@ -54,6 +54,7 @@ struct AppState {
     memory: Arc<Mutex<Memory>>,
     embedder: Arc<Embedder>,
     chat: Arc<RemoteLLM>,
+    summarizer: Arc<RemoteLLM>,
     reranker: Option<Arc<Reranker>>,
     journaler: Arc<Journaler>,
     cfg: MemConfig,
@@ -80,38 +81,9 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    let config_path = cli
-        .config
-        .or_else(MemConfig::default_path)
-        .context("could not resolve config path: $HOME unset and --config not given")?;
-    let cfg = MemConfig::load(&config_path)?;
-
-    let model_name = if cfg.local_embed {
-        cfg.local_embed_model.as_str()
-    } else {
-        cfg.embed_model.as_str()
-    };
-    let mut memory = Memory::open(
-        &cfg.data_dir,
-        model_name,
-        cfg.decay_half_life_days,
-        cfg.semantic_weight,
-        cfg.lexical_weight,
-    )?;
-
-    let embedder = if cfg.local_embed {
-        Embedder::Local(LocalLLM::new(
-            &cfg.data_dir.join("models"),
-            &cfg.local_embed_model,
-        )?)
-    } else {
-        Embedder::Remote(RemoteLLM::new(
-            &cfg.base_url,
-            &cfg.api_key,
-            &cfg.chat_model,
-            &cfg.embed_model,
-        ))
-    };
+    let cfg = MemConfig::load_or_default(cli.config)?;
+    let mut memory = Memory::open_from_config(&cfg)?;
+    let embedder = Embedder::from_config(&cfg)?;
 
     let reranker = match Reranker::new(&cfg.data_dir.join("models"), &cfg.rerank_model) {
         Ok(r) => Some(Arc::new(r)),
@@ -125,6 +97,12 @@ async fn main() -> Result<()> {
         &cfg.base_url,
         &cfg.api_key,
         &cfg.chat_model,
+        &cfg.embed_model,
+    ));
+    let summarizer = Arc::new(RemoteLLM::new(
+        &cfg.base_url,
+        &cfg.api_key,
+        &cfg.summarizer_model,
         &cfg.embed_model,
     ));
     let journaler = Arc::new(Journaler::new(&cfg.data_dir));
@@ -153,6 +131,7 @@ async fn main() -> Result<()> {
         memory: Arc::new(Mutex::new(memory)),
         embedder: Arc::new(embedder),
         chat,
+        summarizer,
         reranker,
         journaler,
         cfg,
@@ -169,7 +148,7 @@ async fn main() -> Result<()> {
         .route("/v1/responses", post(handle_responses))
         .with_state(state);
 
-    tracing::info!(%bind, %upstream, config = %config_path.display(), "noesis-proxy starting");
+    tracing::info!(%bind, %upstream, "noesis-proxy starting");
     let listener = tokio::net::TcpListener::bind(bind).await?;
     axum::serve(listener, app).await?;
     Ok(())
@@ -218,7 +197,7 @@ async fn run_journal_tick(state: Arc<AppState>) {
     let messages = vec![
         Message {
             role: Role::System,
-            content: SUMMARIZER_PROMPT.to_string(),
+            content: load_journal_prompt(&state.cfg.data_dir),
         },
         Message {
             role: Role::User,
@@ -226,7 +205,7 @@ async fn run_journal_tick(state: Arc<AppState>) {
         },
     ];
 
-    let summary = match state.chat.respond(&messages, None, false).await {
+    let summary = match state.summarizer.respond(&messages, None, false).await {
         Ok((text, _id)) => text,
         Err(e) => {
             tracing::warn!("journal: LLM call failed: {e}");
@@ -278,18 +257,18 @@ async fn run_dream_if_due(state: Arc<AppState>) {
     let dream_state = auto_dream.load_state().await;
     let last_ts = dream_state.last_as_ts();
 
-    let sessions = {
+    let user_messages = {
         let mem = state.memory.lock().await;
-        match mem.sessions_since(last_ts) {
+        match mem.user_messages_since(last_ts) {
             Ok(n) => n,
             Err(e) => {
-                tracing::warn!("dream: sessions_since: {e}");
+                tracing::warn!("dream: user_messages_since: {e}");
                 return;
             }
         }
     };
 
-    match auto_dream.should_run(sessions).await {
+    match auto_dream.should_run(user_messages).await {
         Ok(true) => {}
         Ok(false) => return,
         Err(e) => {
@@ -300,7 +279,15 @@ async fn run_dream_if_due(state: Arc<AppState>) {
 
     tracing::info!("dream: starting consolidation");
 
-    let plan = match run_consolidation(&state.cfg.data_dir, state.chat.as_ref(), last_ts).await {
+    let topic_prompt = load_topic_prompt(&state.cfg.data_dir);
+    let plan = match run_consolidation(
+        &state.cfg.data_dir,
+        state.chat.as_ref(),
+        &topic_prompt,
+        last_ts,
+    )
+    .await
+    {
         Ok(p) => p,
         Err(e) => {
             tracing::warn!("dream: consolidation failed: {e}");
@@ -578,21 +565,6 @@ async fn retrieve_context(state: &AppState, query: &str) -> Vec<SearchRow> {
             Vec::new()
         }
     }
-}
-
-fn format_context_block(rows: &[SearchRow]) -> String {
-    let mut s = String::from(
-        "<retrieved_memory>\nThe following notes from the user's persistent memory may be relevant. \
-         Use them when they apply; ignore them when they don't.\n\n",
-    );
-    for row in rows {
-        s.push_str(&format!(
-            "[{} L{}-{}]\n{}\n\n",
-            row.path, row.start_line, row.end_line, row.text
-        ));
-    }
-    s.push_str("</retrieved_memory>");
-    s
 }
 
 /// Set the top-level `instructions` field to `context.md`. If the client
