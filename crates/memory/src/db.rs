@@ -88,6 +88,9 @@ fn ensure_schema(conn: &Connection) -> Result<()> {
 
         CREATE INDEX IF NOT EXISTS retrievals_chunk_ts
             ON retrievals (chunk_id, ts);
+
+        CREATE INDEX IF NOT EXISTS retrievals_session_turn
+            ON retrievals (session_id, turn_index);
     ")?;
 
     // Migration for retrievals tables created before the label column existed.
