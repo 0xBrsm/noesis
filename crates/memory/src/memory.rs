@@ -241,6 +241,39 @@ impl Memory {
         db::load_chunk_embedding(&self.conn, id)
     }
 
+    // ── Derivation ────────────────────────────────────────────────────────────
+
+    pub fn session_ids(&self) -> Result<Vec<String>> {
+        db::list_session_ids(&self.conn)
+    }
+
+    pub fn load_session(&self, session_id: &str) -> Result<Vec<db::SessionMessage>> {
+        db::load_session(&self.conn, session_id)
+    }
+
+    pub fn load_derivation(
+        &self,
+        session_id: &str,
+        content_hash: &str,
+        prompt_format: u32,
+    ) -> Result<Option<String>> {
+        db::load_derivation(&self.conn, session_id, content_hash, prompt_format)
+    }
+
+    pub fn save_derivation(
+        &self,
+        session_id: &str,
+        content_hash: &str,
+        prompt_format: u32,
+        digest: &str,
+    ) -> Result<()> {
+        db::save_derivation(&self.conn, session_id, content_hash, prompt_format, digest)
+    }
+
+    pub fn all_derivations(&self, prompt_format: u32) -> Result<Vec<(String, String)>> {
+        db::all_derivations(&self.conn, prompt_format)
+    }
+
     // ── Search ────────────────────────────────────────────────────────────────
 
     pub fn search_keyword(&self, query: &str, limit: usize) -> Result<Vec<SearchRow>> {
@@ -407,6 +440,13 @@ pub fn load_topic_prompt(data_dir: &Path) -> String {
 
 pub fn load_consolidate_prompt(data_dir: &Path) -> String {
     load_prompt(data_dir, "consolidate", crate::consolidate::CONSOLIDATE_PROMPT)
+}
+
+/// Overriding this changes what the model was asked, so banked digests no
+/// longer answer the current question. Bump `derive::PROMPT_FORMAT` alongside
+/// any edit, or a re-run will skip every session it has already derived.
+pub fn load_derive_prompt(data_dir: &Path) -> String {
+    load_prompt(data_dir, "derive", crate::derive::DERIVE_PROMPT)
 }
 
 fn collect_md_files(dir: &Path) -> Vec<PathBuf> {

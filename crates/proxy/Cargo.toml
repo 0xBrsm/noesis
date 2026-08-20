@@ -27,6 +27,10 @@ path = "src/bin/consolidate.rs"
 name = "noesis-retrieval-replay"
 path = "src/bin/retrieval-replay.rs"
 
+[[bin]]
+name = "noesis-derive"
+path = "src/bin/derive.rs"
+
 [dependencies]
 noesis-memory = { workspace = true }
 

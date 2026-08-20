@@ -3,9 +3,10 @@ use async_openai::{
     Client,
     config::OpenAIConfig,
     types::{
-        CreateEmbeddingRequestArgs,
+        CreateEmbeddingRequestArgs, ResponseFormatJsonSchema,
         responses::{CreateResponse, Input, InputContent, InputItem, InputMessage,
-                    InputMessageType, OutputContent, Role as ResponseRole},
+                    InputMessageType, OutputContent, Role as ResponseRole,
+                    TextConfig, TextResponseFormat},
     },
 };
 use fastembed::{
@@ -138,6 +139,58 @@ impl RemoteLLM {
                 response.id,
             );
         }
+
+        Ok((text, response.id))
+    }
+
+    /// Send via Responses API demanding `schema`-shaped JSON back. Returns
+    /// (raw json text, response_id).
+    ///
+    /// `instructions` is deliberately a separate argument rather than a leading
+    /// system message: it sits at the front of the cacheable prefix, so calls
+    /// meant to share a cached prefix must pass the identical string or miss it
+    /// entirely. The schema is part of that same prefix identity.
+    pub async fn respond_json(
+        &self,
+        instructions: &str,
+        user: &str,
+        schema_name: &str,
+        schema: serde_json::Value,
+    ) -> Result<(String, String)> {
+        let request = CreateResponse {
+            model: self.chat_model.clone(),
+            input: Input::Text(user.to_string()),
+            instructions: Some(instructions.to_string()),
+            store: Some(true),
+            text: Some(TextConfig {
+                format: TextResponseFormat::JsonSchema(ResponseFormatJsonSchema {
+                    description: None,
+                    name: schema_name.to_string(),
+                    schema: Some(schema),
+                    strict: Some(true),
+                }),
+            }),
+            ..Default::default()
+        };
+
+        let response = self.client.responses().create(request).await?;
+        let text = response
+            .output
+            .iter()
+            .find_map(|o| {
+                if let OutputContent::Message(msg) = o {
+                    msg.content.iter().find_map(|c| {
+                        if let async_openai::types::responses::Content::OutputText(t) = c {
+                            Some(t.text.clone())
+                        } else {
+                            None
+                        }
+                    })
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default();
 
         Ok((text, response.id))
     }

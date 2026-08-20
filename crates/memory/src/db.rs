@@ -27,6 +27,20 @@ pub fn register_vec_extension() -> bool {
 }
 
 fn ensure_schema(conn: &Connection) -> Result<()> {
+    // `conversations` held individual messages, which collides with the derived
+    // unit of the same name. Rename before the CREATE below, or an empty
+    // `messages` would exist and the old rows would be stranded.
+    let has_old_table = conn
+        .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='conversations'")?
+        .exists([])?;
+    if has_old_table {
+        conn.execute_batch(
+            "DROP INDEX IF EXISTS conversations_session;
+             DROP INDEX IF EXISTS conversations_role_ts;
+             ALTER TABLE conversations RENAME TO messages;",
+        )?;
+    }
+
     conn.execute_batch("
         CREATE TABLE IF NOT EXISTS files (
             path        TEXT PRIMARY KEY,
@@ -53,7 +67,7 @@ fn ensure_schema(conn: &Connection) -> Result<()> {
             end_line   UNINDEXED
         );
 
-        CREATE TABLE IF NOT EXISTS conversations (
+        CREATE TABLE IF NOT EXISTS messages (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             session_id  TEXT NOT NULL,
             turn_index  INTEGER NOT NULL,
@@ -63,11 +77,24 @@ fn ensure_schema(conn: &Connection) -> Result<()> {
             ts          REAL NOT NULL
         );
 
-        CREATE INDEX IF NOT EXISTS conversations_session
-            ON conversations (session_id, turn_index);
+        CREATE INDEX IF NOT EXISTS messages_session
+            ON messages (session_id, turn_index);
 
-        CREATE INDEX IF NOT EXISTS conversations_role_ts
-            ON conversations (role, ts);
+        CREATE INDEX IF NOT EXISTS messages_role_ts
+            ON messages (role, ts);
+
+        -- Banked model output. `digest` is the raw phase-1/phase-2 JSON, kept so
+        -- a rendering change can be replayed without paying for the calls again.
+        -- `content_hash` covers the session's messages, so an edited or extended
+        -- session derives afresh while an untouched one is skipped.
+        CREATE TABLE IF NOT EXISTS derivations (
+            session_id    TEXT NOT NULL,
+            content_hash  TEXT NOT NULL,
+            prompt_format INTEGER NOT NULL,
+            digest        TEXT NOT NULL,
+            derived_at    REAL NOT NULL,
+            PRIMARY KEY (session_id, content_hash, prompt_format)
+        );
 
         CREATE TABLE IF NOT EXISTS retrievals (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -381,7 +408,7 @@ pub fn insert_turn(
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs_f64();
     conn.execute(
-        "INSERT INTO conversations (session_id, turn_index, role, content, response_id, ts)
+        "INSERT INTO messages (session_id, turn_index, role, content, response_id, ts)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![session_id, turn_index as i64, role, content, response_id, ts],
     )?;
@@ -391,7 +418,7 @@ pub fn insert_turn(
 /// Returns the response_id of the most recent assistant turn, for previous_response_id chaining.
 pub fn last_response_id(conn: &Connection) -> Result<Option<String>> {
     let mut stmt = conn.prepare(
-        "SELECT response_id FROM conversations
+        "SELECT response_id FROM messages
          WHERE role = 'assistant' AND response_id IS NOT NULL
          ORDER BY ts DESC LIMIT 1",
     )?;
@@ -402,7 +429,7 @@ pub fn last_response_id(conn: &Connection) -> Result<Option<String>> {
 /// Load all prior turns in chronological order, ready to use as history.
 pub fn load_recent_turns(conn: &Connection) -> Result<Vec<(String, String)>> {
     let mut stmt = conn.prepare(
-        "SELECT role, content FROM conversations
+        "SELECT role, content FROM messages
          ORDER BY ts ASC, turn_index ASC",
     )?;
     let turns = stmt
@@ -415,7 +442,7 @@ pub fn load_recent_turns(conn: &Connection) -> Result<Vec<(String, String)>> {
 /// background journal summarizer to grab the delta since its last entry.
 pub fn load_turns_since(conn: &Connection, since_ts: f64) -> Result<Vec<(String, String, f64)>> {
     let mut stmt = conn.prepare(
-        "SELECT role, content, ts FROM conversations
+        "SELECT role, content, ts FROM messages
          WHERE ts > ?
          ORDER BY ts ASC, turn_index ASC",
     )?;
@@ -437,11 +464,115 @@ pub fn load_turns_since(conn: &Connection, since_ts: f64) -> Result<Vec<(String,
 /// loops overcount).
 pub fn count_user_messages_since(conn: &Connection, since_ts: f64) -> Result<usize> {
     let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM conversations WHERE role = 'user' AND ts > ?",
+        "SELECT COUNT(*) FROM messages WHERE role = 'user' AND ts > ?",
         [since_ts],
         |r| r.get(0),
     )?;
     Ok(count as usize)
+}
+
+// ── Derivation ────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct SessionMessage {
+    pub role: String,
+    pub content: String,
+    pub ts: f64,
+}
+
+/// Session ids in first-message order, so a resumed run processes oldest first.
+pub fn list_session_ids(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT session_id FROM messages
+         GROUP BY session_id
+         ORDER BY MIN(ts) ASC",
+    )?;
+    let ids = stmt
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(ids)
+}
+
+pub fn load_session(conn: &Connection, session_id: &str) -> Result<Vec<SessionMessage>> {
+    let mut stmt = conn.prepare(
+        "SELECT role, content, ts FROM messages
+         WHERE session_id = ?
+         ORDER BY turn_index ASC, ts ASC",
+    )?;
+    let rows = stmt
+        .query_map([session_id], |r| {
+            Ok(SessionMessage {
+                role: r.get(0)?,
+                content: r.get(1)?,
+                ts: r.get(2)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Identifies a session's exact content. Appending a turn changes it, so the
+/// session re-derives; nothing else does.
+pub fn session_content_hash(messages: &[SessionMessage]) -> String {
+    let mut hasher = Sha256::new();
+    for m in messages {
+        hasher.update(m.role.as_bytes());
+        hasher.update([0u8]);
+        hasher.update(m.content.as_bytes());
+        hasher.update([0u8]);
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+pub fn load_derivation(
+    conn: &Connection,
+    session_id: &str,
+    content_hash: &str,
+    prompt_format: u32,
+) -> Result<Option<String>> {
+    let digest = conn
+        .query_row(
+            "SELECT digest FROM derivations
+             WHERE session_id = ?1 AND content_hash = ?2 AND prompt_format = ?3",
+            params![session_id, content_hash, prompt_format],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()?;
+    Ok(digest)
+}
+
+pub fn save_derivation(
+    conn: &Connection,
+    session_id: &str,
+    content_hash: &str,
+    prompt_format: u32,
+    digest: &str,
+) -> Result<()> {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs_f64();
+    conn.execute(
+        "INSERT OR REPLACE INTO derivations
+         (session_id, content_hash, prompt_format, digest, derived_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![session_id, content_hash, prompt_format, digest, ts],
+    )?;
+    Ok(())
+}
+
+/// Every banked digest at `prompt_format`, for a re-render with no model calls.
+pub fn all_derivations(conn: &Connection, prompt_format: u32) -> Result<Vec<(String, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT session_id, digest FROM derivations
+         WHERE prompt_format = ?
+         ORDER BY derived_at ASC",
+    )?;
+    let rows = stmt
+        .query_map([prompt_format], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
 }
 
 // ── Search ────────────────────────────────────────────────────────────────────
@@ -660,8 +791,8 @@ pub struct QaPair {
 pub fn load_unreplayed_qa_pairs(conn: &Connection, limit: usize) -> Result<Vec<QaPair>> {
     let mut stmt = conn.prepare(
         "SELECT u.session_id, u.turn_index, u.ts, u.content, a.content
-         FROM conversations u
-         JOIN conversations a
+         FROM messages u
+         JOIN messages a
            ON a.session_id = u.session_id
           AND a.turn_index = u.turn_index + 1
           AND a.role = 'assistant'
@@ -738,5 +869,85 @@ fn bm25_to_score(rank: f64) -> f64 {
         r / (1.0 + r)
     } else {
         1.0 / (1.0 + rank)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The rename runs against a live memory.db holding real history, so the
+    /// rows have to survive it.
+    #[test]
+    fn migration_carries_conversation_rows_into_messages() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE conversations (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id  TEXT NOT NULL,
+                turn_index  INTEGER NOT NULL,
+                role        TEXT NOT NULL,
+                content     TEXT NOT NULL,
+                response_id TEXT,
+                ts          REAL NOT NULL
+             );
+             CREATE INDEX conversations_session ON conversations (session_id, turn_index);
+             CREATE INDEX conversations_role_ts ON conversations (role, ts);
+             INSERT INTO conversations (session_id, turn_index, role, content, response_id, ts)
+             VALUES ('s1', 0, 'user', 'hello', NULL, 1.0),
+                    ('s1', 1, 'assistant', 'hi', 'resp_1', 2.0);",
+        )
+        .unwrap();
+
+        ensure_schema(&conn).unwrap();
+
+        let rows = load_session(&conn, "s1").unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].content, "hello");
+        assert_eq!(rows[1].role, "assistant");
+        assert!(!conn
+            .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='conversations'")
+            .unwrap()
+            .exists([])
+            .unwrap());
+    }
+
+    #[test]
+    fn ensure_schema_is_idempotent_on_a_fresh_db() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        ensure_schema(&conn).unwrap();
+        assert!(list_session_ids(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn content_hash_tracks_appended_turns() {
+        let m = |c: &str| SessionMessage { role: "user".into(), content: c.into(), ts: 0.0 };
+        let one = vec![m("a")];
+        let two = vec![m("a"), m("b")];
+        assert_eq!(session_content_hash(&one), session_content_hash(&[m("a")]));
+        assert_ne!(session_content_hash(&one), session_content_hash(&two));
+        // Field boundaries are delimited, so a split cannot be forged by
+        // concatenation.
+        let joined = vec![m("ab")];
+        assert_ne!(session_content_hash(&joined), session_content_hash(&two));
+    }
+
+    #[test]
+    fn derivations_round_trip_and_are_scoped_by_format() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        save_derivation(&conn, "s1", "hash1", 1, "{\"x\":1}").unwrap();
+
+        assert_eq!(
+            load_derivation(&conn, "s1", "hash1", 1).unwrap().as_deref(),
+            Some("{\"x\":1}")
+        );
+        // A prompt-format bump invalidates the bank, which is the whole point.
+        assert!(load_derivation(&conn, "s1", "hash1", 2).unwrap().is_none());
+        // So does edited session content.
+        assert!(load_derivation(&conn, "s1", "hash2", 1).unwrap().is_none());
+        assert_eq!(all_derivations(&conn, 1).unwrap().len(), 1);
+        assert!(all_derivations(&conn, 2).unwrap().is_empty());
     }
 }
