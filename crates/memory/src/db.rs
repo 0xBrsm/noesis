@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
@@ -65,8 +65,50 @@ fn ensure_schema(conn: &Connection) -> Result<()> {
 
         CREATE INDEX IF NOT EXISTS conversations_session
             ON conversations (session_id, turn_index);
+
+        CREATE INDEX IF NOT EXISTS conversations_role_ts
+            ON conversations (role, ts);
+
+        CREATE TABLE IF NOT EXISTS retrievals (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts           REAL NOT NULL,
+            session_id   TEXT NOT NULL,
+            turn_index   INTEGER NOT NULL,
+            query        TEXT NOT NULL,
+            chunk_id     TEXT NOT NULL,
+            chunk_path   TEXT NOT NULL,
+            rank         INTEGER NOT NULL,
+            score        REAL NOT NULL,
+            raw_score    REAL NOT NULL,
+            vector_score REAL,
+            text_score   REAL,
+            injected     INTEGER NOT NULL,
+            label        REAL
+        );
+
+        CREATE INDEX IF NOT EXISTS retrievals_chunk_ts
+            ON retrievals (chunk_id, ts);
+
+        CREATE INDEX IF NOT EXISTS retrievals_session_turn
+            ON retrievals (session_id, turn_index);
     ")?;
+
+    // Migration for retrievals tables created before the label column existed.
+    let has_label = conn
+        .prepare("SELECT 1 FROM pragma_table_info('retrievals') WHERE name='label'")?
+        .exists([])?;
+    if !has_label {
+        conn.execute("ALTER TABLE retrievals ADD COLUMN label REAL", [])?;
+    }
     Ok(())
+}
+
+pub fn vec_table_exists(conn: &Connection) -> bool {
+    conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='chunks_vec'",
+        [],
+        |r| r.get::<_, i64>(0),
+    ).unwrap_or(0) > 0
 }
 
 pub fn ensure_vec_table(conn: &Connection, dims: usize) -> Result<()> {
@@ -95,14 +137,19 @@ pub struct Chunk {
 /// Each section (header + body) becomes one chunk.
 /// Content before the first header is its own chunk with empty context.
 /// `context` is the breadcrumb path of parent headers, used for contextual embedding.
+///
+/// A leading YAML frontmatter block (`---\n...\n---`) is skipped — it's
+/// navigational metadata (summary, aliases) used by the consolidation agent
+/// and would otherwise clutter retrieval results.
 pub fn chunk_markdown(content: &str) -> Vec<Chunk> {
     let lines: Vec<&str> = content.lines().collect();
+    let body_start = frontmatter_end(&lines);
     let mut chunks: Vec<Chunk> = Vec::new();
 
     // Track header hierarchy [h1, h2, h3]
     let mut headers: [Option<String>; 3] = [None, None, None];
 
-    let mut section_start: usize = 0;
+    let mut section_start: usize = body_start;
     let mut section_lines: Vec<&str> = Vec::new();
     let mut section_context = String::new();
 
@@ -117,7 +164,7 @@ pub fn chunk_markdown(content: &str) -> Vec<Chunk> {
         });
     };
 
-    for (i, &line) in lines.iter().enumerate() {
+    for (i, &line) in lines.iter().enumerate().skip(body_start) {
         let level = header_level(line);
         if let Some(lvl) = level {
             // Flush current section
@@ -143,6 +190,22 @@ pub fn chunk_markdown(content: &str) -> Vec<Chunk> {
     flush(&section_lines, section_start, &section_context, &mut chunks);
 
     chunks
+}
+
+/// Index of the first body line after a leading YAML frontmatter block,
+/// or 0 if the content doesn't start with one. A frontmatter block is
+/// `---` on its own line, followed by metadata, followed by another `---`.
+fn frontmatter_end(lines: &[&str]) -> usize {
+    if lines.first().map(|l| l.trim()) != Some("---") {
+        return 0;
+    }
+    for (i, line) in lines.iter().enumerate().skip(1) {
+        if line.trim() == "---" {
+            return i + 1;
+        }
+    }
+    // Unclosed frontmatter — treat the whole file as body.
+    0
 }
 
 fn header_level(line: &str) -> Option<usize> {
@@ -205,6 +268,22 @@ pub fn delete_chunks(conn: &Connection, path: &str) -> Result<()> {
     Ok(())
 }
 
+/// Drop rows from `chunks_vec` whose `id` no longer exists in `chunks`.
+/// `delete_chunks` deletes vec rows via an id-join through `chunks`; if a prior
+/// run crashed between writing the two tables, the vec row becomes unreachable
+/// and a future `upsert_vec` may collide on it (vec0 doesn't honor INSERT OR
+/// REPLACE the same way regular tables do).
+pub fn sweep_orphan_vecs(conn: &Connection) -> Result<usize> {
+    if !vec_table_exists(conn) {
+        return Ok(0);
+    }
+    let n = conn.execute(
+        "DELETE FROM chunks_vec WHERE id NOT IN (SELECT id FROM chunks)",
+        [],
+    )?;
+    Ok(n)
+}
+
 pub fn upsert_chunk(
     conn: &Connection,
     id: &str,
@@ -236,11 +315,48 @@ pub fn upsert_chunk(
 
 pub fn upsert_vec(conn: &Connection, id: &str, embedding: &[f32]) -> Result<()> {
     let blob: Vec<u8> = embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
+    // vec0 doesn't reliably honor INSERT OR REPLACE — explicit DELETE+INSERT
+    // is the documented-safe pattern and idempotent against orphan rows.
+    conn.execute("DELETE FROM chunks_vec WHERE id = ?", params![id])?;
     conn.execute(
-        "INSERT OR REPLACE INTO chunks_vec (id, embedding) VALUES (?1, ?2)",
+        "INSERT INTO chunks_vec (id, embedding) VALUES (?1, ?2)",
         params![id, blob],
     )?;
     Ok(())
+}
+
+/// Chunk embeddings for top-level topic files, as (path, vector) pairs.
+/// Nested paths (e.g. hand-dropped doc trees under topics/) are excluded —
+/// consolidation only merges flat `topics/<slug>.md` files.
+pub fn load_topic_embeddings(conn: &Connection) -> Result<Vec<(String, Vec<f32>)>> {
+    let mut stmt = conn.prepare(
+        "SELECT path, embedding FROM chunks
+         WHERE path LIKE 'topics/%' AND path NOT LIKE 'topics/%/%'
+           AND embedding IS NOT NULL",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (path, blob) = row?;
+        out.push((path, decode_embedding(&blob)));
+    }
+    Ok(out)
+}
+
+fn decode_embedding(blob: &[u8]) -> Vec<f32> {
+    blob.chunks_exact(4)
+        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        .collect()
+}
+
+pub fn load_chunk_embedding(conn: &Connection, id: &str) -> Result<Option<Vec<f32>>> {
+    let blob: Option<Vec<u8>> = conn
+        .prepare_cached("SELECT embedding FROM chunks WHERE id = ?1")?
+        .query_row([id], |r| r.get(0))
+        .optional()?;
+    Ok(blob.map(|b| decode_embedding(&b)))
 }
 
 pub fn list_file_paths(conn: &Connection) -> Result<Vec<String>> {
@@ -293,6 +409,39 @@ pub fn load_recent_turns(conn: &Connection) -> Result<Vec<(String, String)>> {
         .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(turns)
+}
+
+/// Load turns with `ts > since_ts` in chronological order — used by the
+/// background journal summarizer to grab the delta since its last entry.
+pub fn load_turns_since(conn: &Connection, since_ts: f64) -> Result<Vec<(String, String, f64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT role, content, ts FROM conversations
+         WHERE ts > ?
+         ORDER BY ts ASC, turn_index ASC",
+    )?;
+    let turns = stmt
+        .query_map([since_ts], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, f64>(2)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(turns)
+}
+
+/// Count user messages stored after `since_ts` (unix seconds as f64). This is
+/// the signal for "enough new input to consolidate" — session_id is a poor
+/// proxy because it's per-process (long conversations undercount, restart
+/// loops overcount).
+pub fn count_user_messages_since(conn: &Connection, since_ts: f64) -> Result<usize> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM conversations WHERE role = 'user' AND ts > ?",
+        [since_ts],
+        |r| r.get(0),
+    )?;
+    Ok(count as usize)
 }
 
 // ── Search ────────────────────────────────────────────────────────────────────
@@ -446,6 +595,99 @@ pub fn search_hybrid(
     Ok(merged)
 }
 
+// ── Retrieval log ─────────────────────────────────────────────────────────────
+
+/// One retrieval candidate to record: the row, its post-rerank rank, and
+/// whether it survived chain dedup and was actually injected. `label` is a
+/// relevance signal filled in by offline replay (None for live traffic).
+pub struct RetrievalEvent<'a> {
+    pub row: &'a SearchRow,
+    pub rank: usize,
+    pub injected: bool,
+    pub label: Option<f32>,
+}
+
+/// Append retrieval candidates for one query to the log. Training data for
+/// learned ranking/retention later; cheap to write, never read on the hot path.
+pub fn log_retrievals(
+    conn: &Connection,
+    session_id: &str,
+    turn_index: usize,
+    query: &str,
+    events: &[RetrievalEvent<'_>],
+) -> Result<()> {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs_f64();
+    let mut stmt = conn.prepare_cached(
+        "INSERT INTO retrievals
+            (ts, session_id, turn_index, query, chunk_id, chunk_path,
+             rank, score, raw_score, vector_score, text_score, injected, label)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+    )?;
+    for e in events {
+        stmt.execute(params![
+            ts,
+            session_id,
+            turn_index as i64,
+            query,
+            e.row.id,
+            e.row.path,
+            e.rank as i64,
+            e.row.score as f64,
+            e.row.raw_score as f64,
+            e.row.vector_score.map(|v| v as f64),
+            e.row.text_score.map(|v| v as f64),
+            e.injected as i64,
+            e.label.map(|v| v as f64),
+        ])?;
+    }
+    Ok(())
+}
+
+/// A user turn paired with the assistant response that followed it.
+#[derive(Debug, Clone)]
+pub struct QaPair {
+    pub session_id: String,
+    pub turn_index: usize,
+    pub ts: f64,
+    pub question: String,
+    pub answer: String,
+}
+
+/// Load user/assistant pairs that have no retrieval log rows yet, oldest
+/// first — the replay work queue. `limit` of 0 means no limit.
+pub fn load_unreplayed_qa_pairs(conn: &Connection, limit: usize) -> Result<Vec<QaPair>> {
+    let mut stmt = conn.prepare(
+        "SELECT u.session_id, u.turn_index, u.ts, u.content, a.content
+         FROM conversations u
+         JOIN conversations a
+           ON a.session_id = u.session_id
+          AND a.turn_index = u.turn_index + 1
+          AND a.role = 'assistant'
+         WHERE u.role = 'user'
+           AND NOT EXISTS (
+               SELECT 1 FROM retrievals r
+               WHERE r.session_id = u.session_id AND r.turn_index = u.turn_index
+           )
+         ORDER BY u.ts, u.turn_index
+         LIMIT ?1",
+    )?;
+    let limit = if limit == 0 { i64::MAX } else { limit as i64 };
+    let rows = stmt
+        .query_map([limit], |r| {
+            Ok(QaPair {
+                session_id: r.get(0)?,
+                turn_index: r.get::<_, i64>(1)? as usize,
+                ts: r.get(2)?,
+                question: r.get(3)?,
+                answer: r.get(4)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
 // ── FTS helpers ───────────────────────────────────────────────────────────────
 
 static STOP_WORDS: std::sync::LazyLock<std::collections::HashSet<&'static str>> =
@@ -468,12 +710,16 @@ static STOP_WORDS: std::sync::LazyLock<std::collections::HashSet<&'static str>> 
     });
 
 fn build_fts_query(raw: &str) -> Option<String> {
+    // Prefix-match each token (`token*`) so a query for "world" hits indexed
+    // tokens like "worldbuilding" or "worlds". The default unicode61 tokenizer
+    // splits only on non-alphanumeric, so without `*` a phrase query for
+    // "world" requires that exact standalone token in the index.
     let tokens: Vec<String> = raw
         .split(|c: char| !c.is_alphanumeric() && c != '_')
         .filter(|t| !t.is_empty())
         .filter(|t| t.len() >= 2)
         .filter(|t| !STOP_WORDS.contains(t.to_lowercase().as_str()))
-        .map(|t| format!("\"{}\"", t.replace('"', "")))
+        .map(|t| format!("{t}*"))
         .collect();
     if tokens.is_empty() {
         None

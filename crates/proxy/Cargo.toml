@@ -1,0 +1,62 @@
+[package]
+name = "noesis-proxy"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "noesis-proxy"
+path = "src/main.rs"
+
+[[bin]]
+name = "noesis-backfill"
+path = "src/bin/backfill.rs"
+
+[[bin]]
+name = "noesis-dream-backfill"
+path = "src/bin/dream-backfill.rs"
+
+[[bin]]
+name = "noesis-query"
+path = "src/bin/query.rs"
+
+[[bin]]
+name = "noesis-consolidate"
+path = "src/bin/consolidate.rs"
+
+[[bin]]
+name = "noesis-retrieval-replay"
+path = "src/bin/retrieval-replay.rs"
+
+[dependencies]
+noesis-memory = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+futures = { workspace = true }
+
+# HTTP server + client
+axum = { workspace = true }
+reqwest = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+hyper = { workspace = true }
+bytes = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# CLI
+clap = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Utilities
+uuid = { workspace = true }
+chrono = { workspace = true }
